@@ -1,3 +1,0 @@
-#pragma once
-#include_next <type_traits>
-#include "__type_traits.h"
