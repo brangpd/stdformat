@@ -3,16 +3,13 @@
 #if __cplusplus > 201703
 
 #include <array>
-#include <bit>
 #include <charconv>
 #include <concepts>
-#include <iterator>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <variant>
-#include <version>
 
 /* synopsis:
 namespace std {
