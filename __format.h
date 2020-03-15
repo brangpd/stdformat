@@ -379,9 +379,7 @@ private:
   explicit basic_format_arg(float n) noexcept : value(n) {}
   explicit basic_format_arg(double n) noexcept : value(n) {}
   explicit basic_format_arg(long double n) noexcept : value(n) {}
-  explicit basic_format_arg(const char_type *s) : value(s) {
-    // TODO: Preconditions: s points to a NTCTS
-  }
+  explicit basic_format_arg(const char_type *s) : value(s) {}
 
   template <class traits>
   explicit basic_format_arg(basic_string_view<char_type, traits> s) noexcept
@@ -471,7 +469,7 @@ public:
 
 namespace __format_details {
 
-// 'other integral': integral type other than char/wchar_t/bool
+// 'plain integral': integral type other than char/wchar_t/bool
 template <class T, bool Int = is_integral_v<T>>
 struct __is_plain_integral : true_type {};
 template <class T> struct __is_plain_integral<T, false> : false_type {};
@@ -484,12 +482,6 @@ template <> struct __is_plain_integral<bool> : false_type {};
 template <class T>
 constexpr bool __is_plain_integral_v = __is_plain_integral<T>::value;
 template <class T> concept __plain_integral = __is_plain_integral_v<T>;
-
-template <class T> struct __is_char_t : false_type {};
-template <> struct __is_char_t<char> : true_type {};
-template <> struct __is_char_t<wchar_t> : true_type {};
-template <class T> constexpr bool __is_char_t_v = __is_char_t<T>::value;
-template <class T> concept __char_t = __is_char_t_v<T>;
 
 template <class T> struct __is_bool : false_type {};
 template <class T> constexpr bool __is_bool_v = __is_bool<T>::value;
@@ -510,6 +502,7 @@ struct __is_one_of : disjunction<is_same<T, Args>...> {};
 template <class T, class... Args>
 constexpr bool __is_one_of_v = __is_one_of<T, Args...>::value;
 template <class T, class... Args> concept __one_of = __is_one_of_v<T, Args...>;
+template <class T> concept __char_t = __one_of<T, char, wchar_t>;
 
 template <class CharT> struct __formatter_base {
   // fill_and_align_(optional) sign_(optional) sharp_(optional) zero_(optional)
@@ -518,25 +511,36 @@ template <class CharT> struct __formatter_base {
 private:
   enum class fill_and_align {
     none,
-    left,
-    right,
-    center,
+    left,   ///< '<'
+    right,  ///< '>'
+    center, ///< '^'
   };
   enum class sign {
     none,
-    plus,
-    minus,
-    space,
+    plus,  ///< '+'
+    minus, ///< '-'
+    space, ///< ' '
   };
   fill_and_align fill_and_align_ : 2;
   sign sign_ : 2;
-  bool sharp_ : 1;
-  bool zero_ : 1;
-  bool locale_specific_ : 1;
+  bool sharp_ : 1;           ///< '#'
+  bool zero_ : 1;            ///< '0'
+  bool locale_specific_ : 1; ///< 'L'
   char fill_char_;
+  enum { width_none = -1, precision_none = -1, type_none = 0 };
+  bool width_nested_ : 1;
+  bool precision_nested_ : 1;
   char type_;
-  size_t width_;
-  size_t precision_;
+  union {
+    int width_;
+    int width_idx_;
+  }; ///< if using nested width, the index is stored in
+     ///< width_ and should be replaced by the number of
+     ///< that index later. same idea for precision.
+  union {
+    int precision_;
+    int precision_idx_;
+  };
 
 private:
   auto __parse_fill_and_align(auto &it) {
@@ -590,9 +594,48 @@ private:
     }
   }
 
-  auto __parse_width_precision(auto &it) {
-    // TODO parse width precision
-    return;
+  static size_t __parse_a_number(auto &it) {
+    size_t res = 0;
+    while (isdigit(*it)) {
+      res *= 10;
+      res += *it++ - '0';
+    }
+    return res;
+  }
+
+  auto __parse_width_precision(auto &pc, auto &it) {
+    auto parse_part = [&pc, &it](auto &field) -> bool /*nested*/ {
+      bool nested = false;
+      if (*it == '{') {
+        nested = true;
+        // recursive width
+        ++it;
+        if (isdigit(*it)) {
+          field = __parse_a_number(it);
+          pc.check_arg_id(field);
+        } else {
+          // auto index
+          field = pc.next_arg_id();
+        }
+        if (*it == '}') {
+          ++it;
+        } else {
+          __throw_invalid_format();
+        }
+      } else if (isdigit(*it)) {
+        field = __parse_a_number(it);
+      }
+      return nested;
+    };
+
+    width_ = width_none;
+    precision_ = precision_none;
+
+    width_nested_ = parse_part(width_);
+    if (*it == '.') {
+      ++it;
+      precision_nested_ = parse_part(precision_);
+    }
   }
 
   auto __parse_locale_specific(auto &it) {
@@ -607,7 +650,7 @@ private:
   auto __parse_type(auto &it) {
     switch (auto c = *it) {
     default:
-      type_ = 0;
+      type_ = type_none;
       break;
     case 'a':
     case 'A':
@@ -638,6 +681,12 @@ private:
     }
   }
 
+  void __output_upper(auto &outputIt, const basic_string_view<CharT> &data) {
+    for (auto &&c : data) {
+      *outputIt++ = toupper(c);
+    }
+  }
+
   void __output(auto &outputIt, __format_details::__char_t auto c) {
     *outputIt++ = c;
   }
@@ -650,9 +699,10 @@ private:
 #endif
   }
 
-  [[noreturn]] static void __throw_invalid_format() {
+  [[noreturn]] static void
+  __throw_invalid_format(const char *why = "invalid format") {
 #if __cpp_exceptions
-    throw format_error("incomplete format");
+    throw format_error(why);
 #else
     terminate();
 #endif
@@ -665,31 +715,39 @@ public:
 
     __parse_fill_and_align(it);
     __parse_sign_sharp_zero(it);
-    __parse_width_precision(it);
+    __parse_width_precision(pc, it);
     __parse_locale_specific(it);
     __parse_type(it);
 
     return it;
   }
 
-  template <class OutputIt, class Integral>
+  // integral specific
+  template <class OutputIt>
   typename basic_format_context<OutputIt, char>::iterator
-  __format_as_integral(Integral t, basic_format_context<OutputIt, CharT> &fc) {
+  __format_as_integral(integral auto t,
+                       basic_format_context<OutputIt, CharT> &fc) {
     char buf[numeric_limits<uintmax_t>::digits10 * 2];
     auto outIt = fc.out();
     if (type_ == 'b' || type_ == 'B') {
       // binary format
-      __output(outIt, (type_ == 'b') ? "0b" : "0B");
+      if (type_ == 'b') {
+        __output(outIt, "0b");
+      } else {
+        __output(outIt, "0B");
+      }
       auto res = to_chars(begin(buf), end(buf), t, 2);
       __output(outIt, {begin(buf), res.ptr});
     } else if (type_ == 'c') {
       // char
-      auto c = static_cast<char>(t);
-      if (static_cast<Integral>(c) != t) {
+      // check out of range
+      if (numeric_limits<CharT>::max() < t ||
+          numeric_limits<CharT>::min() > t) {
         __throw_char_out_of_range();
       }
+      auto c = static_cast<CharT>(t);
       __output(outIt, c);
-    } else if (type_ == 'd' || type_ == 0) {
+    } else if (type_ == 'd' || type_ == type_none) {
       auto res = to_chars(begin(buf), end(buf), t, 10);
       __output(outIt, {begin(buf), res.ptr});
     } else if (type_ == 'o') {
@@ -702,22 +760,22 @@ public:
     } else if (type_ == 'x' || type_ == 'X') {
       auto res = to_chars(begin(buf), end(buf), t, 16);
       if (type_ == 'X') {
-        for (auto it = begin(buf); it != res.ptr; ++it) {
-          *it = toupper(*it);
-        }
+        __output_upper(outIt, {begin(buf), res.ptr});
+      } else {
+        __output(outIt, {begin(buf), res.ptr});
       }
-      __output(outIt, {begin(buf), res.ptr});
     } else {
       __throw_invalid_format();
     }
     return outIt;
   }
 
+  // string / string_view / c-string specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   format(const string_view &t, basic_format_context<OutputIt, CharT> &fc) {
     auto outIt = fc.out();
-    if (type_ == 0 || type_ == 's') {
+    if (type_ == type_none || type_ == 's') {
       __output(outIt, t);
     } else {
       __throw_invalid_format();
@@ -725,6 +783,7 @@ public:
     return outIt;
   }
 
+  // plain integral specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, char>::iterator
   format(__format_details::__plain_integral auto t,
@@ -736,10 +795,14 @@ public:
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   format(bool t, basic_format_context<OutputIt, CharT> &fc) {
-    if (type_ == 's' || type_ == 0) {
+    if (type_ == 's' || type_ == type_none) {
       // TODO: handle locale specific form
       auto outIt = fc.out();
-      __output(outIt, t ? "true" : "false");
+      if (t) {
+        __output(outIt, "true");
+      } else {
+        __output(outIt, "false");
+      }
       return outIt;
     } else {
       return format(static_cast<unsigned char>(t), fc);
@@ -751,7 +814,7 @@ public:
   typename basic_format_context<OutputIt, CharT>::iterator
   format(__format_details::__char_t auto t,
          basic_format_context<OutputIt, CharT> &fc) {
-    if (type_ == 0 || type_ == 'c') {
+    if (type_ == type_none || type_ == 'c') {
       auto outIt = fc.out();
       __output(outIt, t);
       return outIt;
@@ -760,22 +823,71 @@ public:
     }
   }
 
+  // floating point specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   format(floating_point auto t, basic_format_context<OutputIt, CharT> &fc) {
-    char buf[64];
-    auto it = fc.out();
+    char buf[256];
+    // TODO: what if user specifies a big precision
+    if (precision_ != precision_none && precision_ > 128) {
+      precision_ = 128;
+    }
+    to_chars_result res;
+    auto outIt = fc.out();
+    chars_format cfmt;
+    bool uppercase = false;
+    if (type_ == type_none) {
+      if (precision_ != precision_none) {
+        res = to_chars(begin(buf), end(buf), t, chars_format::general,
+                       precision_);
+      } else {
+        res = to_chars(begin(buf), end(buf), t);
+      }
+      goto L_output;
+    } else if (type_ == 'a' || type_ == 'A') {
+      cfmt = chars_format::hex;
+    } else if (type_ == 'e' || type_ == 'E') {
+      cfmt = chars_format::scientific;
+      if (precision_ == precision_none) {
+        precision_ = 6;
+      }
+    } else if (type_ == 'f' || type_ == 'F') {
+      cfmt = chars_format::fixed;
+      if (precision_ == precision_none) {
+        precision_ = 6;
+      }
+    } else if (type_ == 'g' || type_ == 'G') {
+      cfmt = chars_format::general;
+      if (precision_ == precision_none) {
+        precision_ = 6;
+      }
+    } else {
+      __throw_invalid_format();
+    }
 
-    return it;
+    if (precision_ != precision_none) {
+      res = to_chars(begin(buf), end(buf), t, cfmt, precision_);
+    } else {
+      res = to_chars(begin(buf), end(buf), t, cfmt);
+    }
+
+  L_output:
+    if (isupper(type_)) {
+      __output_upper(outIt, {begin(buf), res.ptr});
+    } else {
+      __output(outIt, {begin(buf), res.ptr});
+    }
+    return outIt;
   }
 
+  // pointer specific
   template <class OutputIt, class PtrT>
       requires is_pointer_v<PtrT> ||
       is_null_pointer_v<PtrT> typename basic_format_context<OutputIt,
                                                             CharT>::iterator
       format(PtrT t, basic_format_context<OutputIt, CharT> &fc) {
 #ifdef __intptr_t_defined
-    if (type_ == 0 || type_ == 'p') {
+    if (type_ == type_none || type_ == 'p') {
       char buf[numeric_limits<uintptr_t>::digits10 + 2];
       auto res =
           to_chars(begin(buf), end(buf), reinterpret_cast<uintptr_t>(t), 16);
@@ -791,73 +903,26 @@ public:
   }
 };
 
-template <__char_t charT, __char_t charU>
-requires(!(is_same_v<charT, wchar_t> &&
-           is_same_v<charU, char>)) struct __char_formatter
-    : __formatter_base<charU> {};
-
 template <__char_t charT>
 struct __c_string_formatter : __formatter_base<charT> {
-  auto format(basic_string_view<charT> sv, auto &fc) {
-    return __formatter_base<charT>::format(sv, fc);
+  inline auto format(const char *pstr, auto &fc) {
+    return __formatter_base<charT>::format(string_view(pstr), fc);
   }
-};
-
-template <class Traits, class Allocator, __char_t charT>
-struct __basic_string_formatter : __formatter_base<charT> {
-  auto format(const basic_string<charT> &s, auto &fc) {
-    return __formatter_base<charT>::format(string_view(s), fc);
-  }
-};
-
-template <class Traits, __char_t charT>
-struct __basic_string_view_formatter : private __formatter_base<charT> {
-  auto parse(auto &pc) { return __formatter_base<charT>::parse(pc); }
-  auto format(auto sv, auto &fc) {
-    return __formatter_base<charT>::format(sv, fc);
-  }
-};
-
-template <class ArithmeticT, __char_t charT>
-    requires(!__is_one_of_v<char, wchar_t, char8_t, char16_t, char32_t>) &&
-    is_arithmetic_v<ArithmeticT> struct __arithmetic_formatter
-    : __formatter_base<charT> {};
-
-template <__char_t charT> struct __pointer_formatter : __formatter_base<charT> {
-  auto parse(auto &pc) { return __formatter_base<charT>::parse(pc); }
-  auto format(auto p, auto &fc) {
-    return __formatter_base<charT>::format(p, fc);
+  template <size_t N> inline auto format(const char (&pstr)[N], auto &fc) {
+    return __formatter_base<charT>::format(string_view(pstr, N), fc);
   }
 };
 } // namespace __format_details
 
-// template <class T, class charT>
-// struct formatter : private __format_details::__formatter_base<char> {
-//  auto parse(basic_format_parse_context<charT> &pc) {
-//    return this->__parse(pc);
-//  }
-//  template <class OutputIt>
-//  auto format(T &&t, basic_format_context<OutputIt, charT> &fc) {
-//    return this->__format(t, fc);
-//  }
-//};
-
+///@{ Standard specializations for basic types and string types
 template <>
 struct formatter<char, char> : __format_details::__formatter_base<char> {};
-
 template <>
-struct formatter<char, wchar_t> : __format_details::__formatter_base<char> {
-  auto parse(auto &pc) {
-    return __format_details::__formatter_base<char>::parse(pc);
-  }
-  template <class OutputIt> auto format(char t, auto &fc) {
-    return __format_details::__formatter_base<char>::format(t, fc);
-  }
+struct formatter<char, wchar_t> : __format_details::__formatter_base<wchar_t> {
 };
-
 template <>
-struct formatter<wchar_t, wchar_t> : __format_details::__formatter_base<char> {
-};
+struct formatter<wchar_t, wchar_t>
+    : __format_details::__formatter_base<wchar_t> {};
 
 template <__format_details::__char_t CharT>
 struct formatter<CharT *, CharT>
@@ -871,36 +936,22 @@ struct formatter<const CharT[N], CharT>
 
 template <class Traits, class Allocator, __format_details::__char_t CharT>
 struct formatter<basic_string<CharT, Traits, Allocator>, CharT>
-    : __format_details::__basic_string_formatter<Traits, Allocator, CharT> {};
+    : __format_details::__formatter_base<CharT> {};
 
 template <class Traits, __format_details::__char_t CharT>
 struct formatter<basic_string_view<CharT, Traits>, CharT>
-    : __format_details::__basic_string_view_formatter<Traits, CharT> {};
+    : __format_details::__formatter_base<CharT> {};
 
 template <class ArithmeticT, __format_details::__char_t CharT>
     requires(!__format_details::__is_one_of_v<ArithmeticT, char, wchar_t,
                                               char8_t, char16_t, char32_t>) &&
     is_arithmetic_v<ArithmeticT> struct formatter<ArithmeticT, CharT>
-    : __format_details::__formatter_base<CharT> {
-  auto parse(auto &pc) {
-    return __format_details::__formatter_base<CharT>::parse(pc);
-  }
-  auto format(ArithmeticT t, auto &fc) {
-    return __format_details::__formatter_base<CharT>::format(t, fc);
-  }
-};
+    : __format_details::__formatter_base<CharT> {};
 
 template <__format_details::__one_of<nullptr_t, void *, const void *> PtrT,
           __format_details::__char_t CharT>
-struct formatter<PtrT, CharT>
-    : private __format_details::__pointer_formatter<CharT> {
-  auto parse(auto &pc) {
-    return __format_details::__pointer_formatter<CharT>::parse(pc);
-  }
-  auto format(auto t, auto &fc) {
-    return __format_details::__pointer_formatter<CharT>::format(t, fc);
-  }
-};
+struct formatter<PtrT, CharT> : __format_details::__formatter_base<CharT> {};
+///@}
 
 namespace __format_details {
 struct __vformat_func {
@@ -911,17 +962,9 @@ private:
   friend wstring std::vformat(const locale &, wstring_view fmt,
                               wformat_args args);
 
-  [[noreturn]] static void __throw_incomplete_format() {
-#if __cpp_exceptions
-    throw format_error("incomplete format");
-#else
-    terminate();
-#endif
-  }
-
-  static void __throw_incomplete_format_if(bool b) {
+  static inline void __throw_invalid_format_if(bool b) {
     if (b) {
-      __throw_incomplete_format();
+      __throw_invalid_format();
     }
   }
 
@@ -959,15 +1002,14 @@ private:
   };
 
   string doit(string_view fmt, format_args args) {
-    string res;
-    bool inField{false};
-    size_t argIdx;
-    size_t argsSize = args.size_;
+    string res;                   ///< formatted result
+    size_t argIdx;                ///< argument index
+    size_t argsSize = args.size_; ///< size of args
     format_context fc(args, back_inserter(res));
     // TODO: what is the second argument used for?
-    format_parse_context pc(fmt);
+    format_parse_context pc(fmt, argsSize);
 
-    for (auto it = fmt.begin(); it != fmt.end();) {
+    for (auto it = pc.begin(); it != pc.end();) {
       if (*it != '{' && *it != '}') {
         // characters other than '{' and '}' are just copied directly
         res += *it++;
@@ -978,69 +1020,75 @@ private:
         // process the argument index if exists, and [it, ite) currently stands
         // for the range of index field.
         ++it;
-        __throw_incomplete_format_if(it == fmt.end());
+        __throw_invalid_format_if(it == pc.end());
         if (*it == '{') {
           // convert "{{" to "{" and copy to the output directly
           res += *it++;
           continue;
         }
+        // now it is one char past the beginning '{'
         auto ite = it;
-        while (ite != fmt.end() && *ite != ':' && *ite != '}') {
-          // head till ':' for index
+        while (ite != pc.end() && *ite != ':' && *ite != '}') {
+          // head till ':' or '}' for index
           ++ite;
         }
-        __throw_incomplete_format_if(ite == fmt.end());
+        __throw_invalid_format_if(ite == pc.end());
+        // now ite ends at ':' or '}'
         bool argIdxSet = false;
         argIdx = 0;
-        // after parsing the index, [it, ite) now stands for the range of format
-        // spec field
-        if (*ite == '}') {
-          // encounter an empty format
-          it = ite;
-        } else if (*ite == ':') {
-          if (ite != it) {
-            // set the index
-            argIdx = 0;
-            // extension: allow negative index
-            bool negative = false;
-            if (*it == '-') {
-              ++it;
-              negative = true;
-            }
-            while (it != ite) {
-              if (isdigit(*it)) {
-                argIdxSet = true;
-                argIdx *= 10;
-                argIdx += *it++;
-              } else {
-                __throw_invalid_format();
-              }
-            }
-            if (negative && argIdx) {
-              argIdx = argsSize - argIdx;
+
+        if (ite != it) {
+          // 1 or more than 1 char between it and ite, that means there must be
+          // an index (no matter ite is now at ':' or '}')
+          argIdxSet = true;
+          // extension: allow negative index
+          bool negative = false;
+          if (*it == '-') {
+            ++it;
+            negative = true;
+          }
+          while (it != ite) {
+            // read the index number
+            if (isdigit(*it)) {
+              argIdx *= 10;
+              argIdx += *it++ - '0';
+            } else {
+              __throw_invalid_format();
             }
           }
-          it = ++ite;
-          while (ite != fmt.end() && *ite != '}') {
-            // head till '}'
-            ++ite;
+          if (negative && argIdx) {
+            argIdx = argsSize - argIdx;
           }
-          __throw_incomplete_format_if(ite == fmt.end());
-          // now ite has '}'
         }
+        // now it must equal ite
+        if (*it == ':') {
+          ++it;
+        }
+        // now it is at one char past ':' (if exists) or at '}' (if no spec)
+        while (ite != pc.end() && *ite != '}') {
+          // head ite till '}'
+          ++ite;
+        }
+        __throw_invalid_format_if(ite == pc.end());
+        // now ite is at '}'
+
+        // find the corresponding arg idx
         if (argIdxSet) {
           pc.check_arg_id(argIdx);
         } else {
           argIdx = pc.next_arg_id();
         }
         if (auto &&arg = fc.arg(argIdx)) {
+          // do parse and format visit.
+          // update the iterator in pc first.
+          pc.advance_to(it);
           visit_format_arg(__visitor(pc, fc), std::move(arg));
         }
-        it = ++ite;
+        it = ite + 1;
       } else /*if (c == '}')*/ {
         // now, only "}}" is accepted
         ++it;
-        __throw_incomplete_format_if(it == fmt.end() || *it != '}');
+        __throw_invalid_format_if(it == fmt.end() || *it != '}');
         // copy the '}' directly
         res += *it++;
         continue;
@@ -1051,23 +1099,24 @@ private:
 
   wstring doit(wstring_view fmt, wformat_args args) { return fmt.data(); }
 };
-
 } // namespace __format_details
 
 // [format.functions], formatting functions
-template <class... Args> string format(string_view fmt, const Args &... args) {
+template <class... Args>
+inline string format(string_view fmt, const Args &... args) {
   return vformat(fmt, make_format_args(args...));
 }
 template <class... Args>
-wstring format(wstring_view fmt, const Args &... args) {
+inline wstring format(wstring_view fmt, const Args &... args) {
   return vformat(fmt, make_wformat_args(args...));
 }
 template <class... Args>
-string format(const locale &loc, string_view fmt, const Args &... args) {
+inline string format(const locale &loc, string_view fmt, const Args &... args) {
   return vformat(loc, fmt, make_format_args(args...));
 }
 template <class... Args>
-wstring format(const locale &loc, wstring_view fmt, const Args &... args) {
+inline wstring format(const locale &loc, wstring_view fmt,
+                      const Args &... args) {
   return vformat(loc, fmt, make_wformat_args(args...));
 }
 
@@ -1089,60 +1138,68 @@ inline wstring vformat(const locale &loc, wstring_view fmt, wformat_args args) {
 }
 
 template <class Out, class... Args>
-Out format_to(Out out, string_view fmt, const Args &... args) {
+inline Out format_to(Out out, string_view fmt, const Args &... args) {
   using context = basic_format_context<Out, decltype(fmt)::value_type>;
   return vformat_to(out, fmt, make_format_args<context>(args...));
 }
 template <class Out, class... Args>
-Out format_to(Out out, wstring_view fmt, const Args &... args) {
+inline Out format_to(Out out, wstring_view fmt, const Args &... args) {
   using context = basic_format_context<Out, decltype(fmt)::value_type>;
   return vformat_to(out, fmt, make_format_args<context>(args...));
 }
 template <class Out, class... Args>
-Out format_to(Out out, const locale &loc, string_view fmt,
-              const Args &... args) {}
+inline Out format_to(Out out, const locale &loc, string_view fmt,
+                     const Args &... args) {
+  using context = basic_format_context<Out, decltype(fmt)::value_type>;
+  return vformat_to(out, loc, fmt, make_format_args<context>(args...));
+}
 template <class Out, class... Args>
-Out format_to(Out out, const locale &loc, wstring_view fmt,
-              const Args &... args) {}
+inline Out format_to(Out out, const locale &loc, wstring_view fmt,
+                     const Args &... args) {
+  using context = basic_format_context<Out, decltype(fmt)::value_type>;
+  return vformat_to(out, loc, fmt, make_format_args<context>(args...));
+}
 
 template <class Out>
-Out vformat_to(Out out, string_view fmt,
-               format_args_t<type_identity_t<Out>, char> args);
+inline Out vformat_to(Out out, string_view fmt,
+                      format_args_t<type_identity_t<Out>, char> args) {}
 template <class Out>
-Out vformat_to(Out out, wstring_view fmt,
-               format_args_t<type_identity_t<Out>, wchar_t> args);
+inline Out vformat_to(Out out, wstring_view fmt,
+                      format_args_t<type_identity_t<Out>, wchar_t> args) {}
 template <class Out>
-Out vformat_to(Out out, const locale &loc, string_view fmt,
-               format_args_t<type_identity_t<Out>, char> args);
+inline Out vformat_to(Out out, const locale &loc, string_view fmt,
+                      format_args_t<type_identity_t<Out>, char> args) {}
 template <class Out>
-Out vformat_to(Out out, const locale &loc, wstring_view fmt,
-               format_args_t<type_identity_t<Out>, wchar_t> args);
+inline Out vformat_to(Out out, const locale &loc, wstring_view fmt,
+                      format_args_t<type_identity_t<Out>, wchar_t> args) {}
 
 template <class Out, class... Args>
-format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                    string_view fmt, const Args &... args) {}
+inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
+                                           string_view fmt,
+                                           const Args &... args) {}
 template <class Out, class... Args>
-format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                    wstring_view fmt, const Args &... args) {}
+inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
+                                           wstring_view fmt,
+                                           const Args &... args) {}
 template <class Out, class... Args>
-format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                    const locale &loc, string_view fmt,
-                                    const Args &... args) {}
+inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
+                                           const locale &loc, string_view fmt,
+                                           const Args &... args) {}
 template <class Out, class... Args>
-format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                    const locale &loc, wstring_view fmt,
-                                    const Args &... args) {}
+inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
+                                           const locale &loc, wstring_view fmt,
+                                           const Args &... args) {}
 
 template <class... Args>
-size_t formatted_size(string_view fmt, const Args &... args) {}
+inline size_t formatted_size(string_view fmt, const Args &... args) {}
 template <class... Args>
-size_t formatted_size(wstring_view fmt, const Args &... args) {}
+inline size_t formatted_size(wstring_view fmt, const Args &... args) {}
 template <class... Args>
-size_t formatted_size(const locale &loc, string_view fmt,
-                      const Args &... args) {}
+inline size_t formatted_size(const locale &loc, string_view fmt,
+                             const Args &... args) {}
 template <class... Args>
-size_t formatted_size(const locale &loc, wstring_view fmt,
-                      const Args &... args) {}
+inline size_t formatted_size(const locale &loc, wstring_view fmt,
+                             const Args &... args) {}
 } // namespace std
 
 #endif // C++20
