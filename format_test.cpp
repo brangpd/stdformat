@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <format>
+#include <chrono>
 using namespace std;
 
 struct FormatTest : testing::Test {};
@@ -9,6 +10,15 @@ struct BasicFormatTest : FormatTest {};
 
 TEST_F(FormatTest, FormatTest_SimpleFormat_Test) {
   EXPECT_EQ(format("{}", 42), "42");
+}
+
+TEST_F(BasicFormatTest, BasicFormatTest_NotFormatted_Test) {
+  EXPECT_EQ(format("Plain Text"), "Plain Text");
+  EXPECT_EQ(format("Plain Text {{"), "Plain Text {");
+  EXPECT_EQ(format("Plain Text {{{{"), "Plain Text {{");
+  EXPECT_EQ(format("Plain Text {{}}"), "Plain Text {}");
+  EXPECT_EQ(format("Plain Text {{}}", "Unused"), "Plain Text {}");
+  EXPECT_EQ(format("Plain Text {{}}", "Unused", 42), "Plain Text {}");
 }
 
 TEST_F(BasicFormatTest, BasicFormatTest_BasicType_Test) {
