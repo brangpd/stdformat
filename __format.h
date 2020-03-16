@@ -3,15 +3,17 @@
 #if __cplusplus > 201703
 
 #include <array>
-#include <charconv>
 #include <concepts>
+#include <iomanip>
+#include <iostream>
 #include <limits>
+#include <locale>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <variant>
 
-/* synopsis:
+/* synopsis ********************************************************************
 namespace std {
 // [format.functions], formatting functions
 template<class... Args>
@@ -99,8 +101,7 @@ template<class Visitor, class Context>
 see below visit_format_arg(Visitor&& vis, basic_format_arg<Context> arg);
 
 // [format.arg.store], class template format-arg-store
-template<class Context, class... Args> struct format-arg-store;      //
-exposition only
+template<class Context, class... Args> struct format-arg-store;
 
 template<class Context = format_context, class... Args>
 format-arg-store<Context, Args...>
@@ -119,24 +120,25 @@ using format_args_t = basic_format_args<basic_format_context<Out, charT>>;
 
 // [format.error], class format_­error
 class format_error;
-}*/
+}
+*******************************************************************************/
 
 // synopsis
 namespace std {
 
-template <class Out, class charT> class basic_format_context;
+template <class Out, class CharT> class basic_format_context;
 using format_context =
     basic_format_context<std::back_insert_iterator<std::string>, char>;
 using wformat_context =
-    basic_format_context<std::back_insert_iterator<std::string>, wchar_t>;
+    basic_format_context<std::back_insert_iterator<std::wstring>, wchar_t>;
 
 // [format.args], class template basic_­format_­args
 template <class Context> class basic_format_args;
 using format_args = basic_format_args<format_context>;
 using wformat_args = basic_format_args<wformat_context>;
 
-template <class Out, class charT>
-using format_args_t = basic_format_args<basic_format_context<Out, charT>>;
+template <class Out, class CharT>
+using format_args_t = basic_format_args<basic_format_context<Out, CharT>>;
 
 // [format.error], class format_­error
 class format_error;
@@ -208,10 +210,10 @@ size_t formatted_size(const locale &loc, wstring_view fmt,
                       const Args &... args);
 
 // [format.formatter], formatter
-template <class T, class charT = char> struct formatter;
+template <class T, class CharT = char> struct formatter;
 
 // [format.parse.ctx], class template basic_­format_­parse_­context
-template <class charT> class basic_format_parse_context;
+template <class CharT> class basic_format_parse_context;
 using format_parse_context = basic_format_parse_context<char>;
 using wformat_parse_context = basic_format_parse_context<wchar_t>;
 
@@ -230,7 +232,6 @@ __format_arg_store<Context, Args...> make_format_args(const Args &... args);
 template <class... Args>
 __format_arg_store<wformat_context, Args...>
 make_wformat_args(const Args &... args);
-
 } // namespace std
 
 // implementation
@@ -246,12 +247,12 @@ public:
   explicit format_error(const char *what_arg) : runtime_error(what_arg) {}
 };
 
-template <class charT> class basic_format_parse_context {
+template <class CharT> class basic_format_parse_context {
   friend __format_details::__vformat_func;
 
 public:
-  using char_type = charT;
-  using const_iterator = typename basic_string_view<charT>::const_iterator;
+  using char_type = CharT;
+  using const_iterator = typename basic_string_view<CharT>::const_iterator;
   using iterator = const_iterator;
 
 private:
@@ -271,7 +272,7 @@ private:
   }
 
 public:
-  constexpr explicit basic_format_parse_context(basic_string_view<charT> fmt,
+  constexpr explicit basic_format_parse_context(basic_string_view<CharT> fmt,
                                                 size_t num_args = 0) noexcept
       : begin_(fmt.begin()), end_(fmt.end()), indexing_(unknown),
         next_arg_id_(0), num_args_(num_args) {}
@@ -440,7 +441,7 @@ public:
   }
 };
 
-template <class Out, class charT> class basic_format_context {
+template <class Out, class CharT> class basic_format_context {
   friend __format_details::__vformat_func;
 
 private:
@@ -448,12 +449,12 @@ private:
   Out out_;
 
   basic_format_context(basic_format_args<basic_format_context> args, Out out)
-      : args_(args), out_(out) {}
+      : args_(std::move(args)), out_(std::move(out)) {}
 
 public:
   using iterator = Out;
-  using char_type = charT;
-  template <class T> using formatter_type = formatter<T, charT>;
+  using char_type = CharT;
+  template <class T> using formatter_type = formatter<T, CharT>;
 
   basic_format_arg<basic_format_context> arg(size_t id) const {
     return args_.get(id);
@@ -466,6 +467,7 @@ public:
 
 namespace __format_details {
 
+namespace { // helper type traits
 // 'plain integral': integral type other than char/wchar_t/bool
 template <class T, bool Int = is_integral_v<T>>
 struct __is_plain_integral : true_type {};
@@ -500,6 +502,71 @@ template <class T, class... Args>
 constexpr bool __is_one_of_v = __is_one_of<T, Args...>::value;
 template <class T, class... Args> concept __one_of = __is_one_of_v<T, Args...>;
 template <class T> concept __char_t = __one_of<T, char, wchar_t>;
+} // namespace
+
+// This implementation use standard output stream to produce results.
+template <class OutIt, class CharT>
+class __format_stream : public basic_ostream<CharT> {
+private:
+  class __format_streambuf : public basic_streambuf<CharT> {
+    friend __format_stream;
+
+    using typename basic_streambuf<CharT>::int_type;
+    using typename basic_streambuf<CharT>::traits_type;
+    using typename basic_streambuf<CharT>::off_type;
+    using typename basic_streambuf<CharT>::pos_type;
+    using typename basic_streambuf<CharT>::char_type;
+
+    OutIt it_; ///< The output iterator to the formatting result.
+
+    __format_streambuf(OutIt &&outIt) : it_(outIt) {}
+
+    // Override all virtual functions and make it useful for output.
+  protected:
+    void imbue(const locale &__loc) override {}
+    int sync() override { return 0; }
+    streamsize showmanyc() override { return -1; }
+    int_type underflow() override { return traits_type::eof(); }
+    int_type pbackfail(int_type __c) override { return traits_type::eof(); }
+    basic_streambuf<CharT> *setbuf(char_type *, std::streamsize) override {
+      return this;
+    }
+    pos_type seekoff(off_type, ios_base::seekdir, ios_base::openmode) override {
+      return pos_type(off_type(-1));
+    }
+    pos_type seekpos(pos_type, ios_base::openmode) override {
+      return pos_type(off_type(-1));
+    }
+    streamsize xsgetn(char_type *, streamsize) override { return 0; }
+    int_type uflow() override { return traits_type::eof(); }
+    streamsize xsputn(const char_type *s, streamsize n) override {
+      for (streamsize i = 0; i < n; ++i) {
+        *it_++ = *s++;
+      }
+      return n;
+    }
+    int_type overflow(int_type __c) override { return traits_type::eof() + 1; }
+  } buf_; ///< The formatter stream's buffer.
+
+  /**
+   * Construct a format stream with the output iterator.
+   * @param outIt The output iterator.
+   */
+  __format_stream(OutIt &&outIt)
+      : basic_ostream<CharT>(&buf_), buf_(std::forward<OutIt>(outIt)) {}
+  __format_stream(OutIt &&outIt, const locale &loc)
+      : basic_ostream<CharT>(&buf_), buf_(std::forward<OutIt>(outIt)) {
+    this->imbue(loc);
+  }
+
+  /**
+   * Get the current output iterator.
+   * @return The output iterator.
+   */
+  auto __it() const { return buf_.it_; }
+
+  friend __formatter_base<CharT>;
+};
 
 template <class CharT> struct __formatter_base {
   // fill_and_align_(optional) sign_(optional) sharp_(optional) zero_(optional)
@@ -518,16 +585,17 @@ private:
     minus, ///< '-'
     space, ///< ' '
   };
+  ios::fmtflags fmtflags_{};
   fill_and_align fill_and_align_ : 2;
   sign sign_ : 2;
   bool sharp_ : 1;           ///< '#'
   bool zero_ : 1;            ///< '0'
   bool locale_specific_ : 1; ///< 'L'
-  char fill_char_;
+  CharT fill_char_;
   enum { width_none = -1, precision_none = -1, type_none = 0 };
   bool width_nested_ : 1;
   bool precision_nested_ : 1;
-  char type_;
+  CharT type_;
   union {
     int width_;
     int width_idx_;
@@ -541,7 +609,8 @@ private:
 
 private:
   auto __parse_fill_and_align(auto &it) {
-    switch (*it) {
+    auto opt = *(it + 1);
+    switch (opt) {
     case '<':
       fill_and_align_ = fill_and_align::left;
       break;
@@ -553,9 +622,10 @@ private:
       break;
     default:
       fill_and_align_ = fill_and_align::none;
-      return it;
+      return;
     }
-    return ++it;
+    fill_char_ = *it;
+    it += 2;
   }
 
   auto __parse_sign_sharp_zero(auto &it) {
@@ -584,7 +654,8 @@ private:
     }
 
     if (*it == '0') {
-      zero_ = true;
+      // if there is a fill and align, 0 is ignored
+      zero_ = (fill_and_align_ == fill_and_align::none);
       ++it;
     } else {
       zero_ = false;
@@ -601,11 +672,12 @@ private:
   }
 
   auto __parse_width_precision(auto &pc, auto &it) {
+    // parse helper for both width and precision
     auto parse_part = [&pc, &it](auto &field) -> bool /*nested*/ {
       bool nested = false;
       if (*it == '{') {
         nested = true;
-        // recursive width
+        // recursive width or precision
         ++it;
         if (isdigit(*it)) {
           field = __parse_a_number(it);
@@ -632,6 +704,8 @@ private:
     if (*it == '.') {
       ++it;
       precision_nested_ = parse_part(precision_);
+    } else {
+      precision_nested_ = false;
     }
   }
 
@@ -672,22 +746,6 @@ private:
     }
   }
 
-  void __output(auto &outputIt, const basic_string_view<CharT> &data) {
-    for (auto &&c : data) {
-      *outputIt++ = c;
-    }
-  }
-
-  void __output_upper(auto &outputIt, const basic_string_view<CharT> &data) {
-    for (auto &&c : data) {
-      *outputIt++ = toupper(c);
-    }
-  }
-
-  void __output(auto &outputIt, __format_details::__char_t auto c) {
-    *outputIt++ = c;
-  }
-
   static void __throw_char_out_of_range() {
 #if __cpp_exceptions
     throw format_error("char out of range");
@@ -705,6 +763,220 @@ private:
 #endif
   }
 
+#define __INIT_FORMAT_STREAM(fs)                                               \
+  __format_stream<OutputIt, CharT> fs(fc.out());                               \
+  if (locale_specific_) {                                                      \
+    fs.imbue(fc.locale());                                                     \
+  }
+
+  // integral specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format_as_integral(integral auto t,
+                       basic_format_context<OutputIt, CharT> &fc) {
+    __INIT_FORMAT_STREAM(fs);
+    if (type_ == 'b' || type_ == 'B') {
+      // binary format is not yet supported by standard io library, output it
+      // directly
+      if (sharp_) {
+        // show base
+        fs << '0' << type_;
+      }
+      // cast to unsigned value to avoid UB
+      using unsigned_int_t = make_unsigned_t<decltype(t)>;
+      unsigned_int_t mask = 1;
+      mask <<= numeric_limits<unsigned_int_t>::digits - 1;
+      while (mask) {
+        fs << ((mask & static_cast<unsigned_int_t>(t)) ? '1' : '0');
+        mask >>= 1;
+      }
+    } else if (type_ == 'c') {
+      // char
+      // check out of range first
+      if (numeric_limits<CharT>::max() < t ||
+          numeric_limits<CharT>::min() > t) {
+        __throw_char_out_of_range();
+      }
+      auto c = static_cast<CharT>(t);
+      fs << c;
+    } else if (type_ == 'd' || type_ == type_none) {
+      // decimal
+      fs << dec << t;
+    } else if (type_ == 'o') {
+      // octal
+      fs << oct << t;
+    } else if (type_ == 'x' || type_ == 'X') {
+      // hexadecimal
+      fs << (sharp_ ? showbase : noshowbase)
+         << (type_ == 'x' ? nouppercase : uppercase) << hex << t;
+    } else {
+      __throw_invalid_format();
+    }
+
+    return fs.__it();
+  }
+
+  // string / string_view / c-string specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format(const basic_string_view<CharT> &t,
+           basic_format_context<OutputIt, CharT> &fc) {
+    if (type_ == type_none || type_ == 's') {
+      __INIT_FORMAT_STREAM(fs);
+      if (precision_ != precision_none) {
+        fs << t.substr(0, precision_);
+      } else {
+        fs << t;
+      }
+      return fs.__it();
+    } else {
+      __throw_invalid_format();
+    }
+  }
+
+  // plain integral specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format(__format_details::__plain_integral auto t,
+           basic_format_context<OutputIt, CharT> &fc) {
+    return __format_as_integral(t, fc);
+  }
+
+  // bool specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format(bool t, basic_format_context<OutputIt, CharT> &fc) {
+    if (type_ == 's' || type_ == type_none) {
+      // print bool as string
+      basic_ostringstream<CharT> oss;
+      oss << boolalpha << t;
+      return format(oss.str(), fc);
+    } else {
+      return format(static_cast<unsigned char>(t), fc);
+    }
+  }
+
+  // char & wchar_t specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format(__format_details::__char_t auto t,
+           basic_format_context<OutputIt, CharT> &fc) {
+    if (type_ == type_none || type_ == 'c') {
+      __INIT_FORMAT_STREAM(fs);
+      fs << t;
+      return fs.__it();
+    } else {
+      return __format_as_integral(t, fc);
+    }
+  }
+
+  // floating point specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format(floating_point auto t, basic_format_context<OutputIt, CharT> &fc) {
+    __INIT_FORMAT_STREAM(fs);
+    if (type_ == type_none) {
+      if (precision_ != precision_none) {
+        fs << defaultfloat;
+      } else {
+        // According to the standard, default behavior with no precision for
+        // floating points is the same as calling to_chars(first, last, value),
+        // which behaves as choosing the minimal length for printf()'s format
+        // between specifiers %f and %e (prefer %f for a tie). For %f, there are
+        // always 6 digits after the radix point; For %e, there are usually 12
+        // digits in total for those who has its exponent less than 100 and 13
+        // digits otherwise. Therefore, a value with less than 5 digits before
+        // the radix point would be treated as fixed, and the others scientific.
+        // (But I am quite curious about why they determined not to just use the
+        // default float produced by standard io.)
+        if (100000 > t - numeric_limits<decltype(t)>::epsilon()) {
+          fs << fixed;
+        } else {
+          fs << scientific;
+        }
+      }
+      goto L_output;
+    } else if (type_ == 'a' || type_ == 'A') {
+      fs << hexfloat;
+    } else if (type_ == 'e' || type_ == 'E') {
+      fs << scientific;
+      if (precision_ == precision_none) {
+        // for 'e' / 'f' / 'g', default precision is always 6.
+        precision_ = 6;
+      }
+    } else if (type_ == 'f' || type_ == 'F') {
+      fs << fixed;
+      if (precision_ == precision_none) {
+        precision_ = 6;
+      }
+    } else if (type_ == 'g' || type_ == 'G') {
+      if (precision_ == precision_none) {
+        precision_ = 6;
+      }
+    } else {
+      __throw_invalid_format();
+    }
+    fs << setprecision(precision_);
+    if (isupper(type_)) {
+      fs << uppercase;
+    }
+
+  L_output:
+    fs << t;
+    return fs.__it();
+  }
+
+  // pointer specific
+  template <class OutputIt, class PtrT>
+      requires is_pointer_v<PtrT> ||
+      is_null_pointer_v<PtrT> typename basic_format_context<OutputIt,
+                                                            CharT>::iterator
+      __format(PtrT t, basic_format_context<OutputIt, CharT> &fc) {
+#ifdef __intptr_t_defined
+    if (type_ == type_none || type_ == 'p') {
+      __INIT_FORMAT_STREAM(fs);
+      fs << hex << reinterpret_cast<uintptr_t>(t);
+      return fs.__it();
+    } else {
+      __throw_invalid_format();
+    }
+#else
+    // TODO: format when uintptr_t is not defined.
+#endif
+  }
+
+  void __format_check(auto &fc) {
+    // check nested width & precision
+    if (width_nested_) {
+      width_ = visit_format_arg(
+          []<class T>(T && v)->int {
+            if constexpr (is_integral_v<T>) {
+              if (v > 0 && v <= numeric_limits<decltype(width_)>::max()) {
+                return v;
+              }
+            }
+            throw format_error("invalid width");
+          },
+          fc.arg(width_idx_));
+      width_nested_ = false;
+    }
+    if (precision_nested_) {
+      precision_ = visit_format_arg(
+          []<class T>(T && v)->int {
+            if constexpr (is_integral_v<T>) {
+              if (v >= 0 && v <= numeric_limits<decltype(precision_)>::max()) {
+                return v;
+              }
+            }
+            throw format_error("invalid precision");
+          },
+          fc.arg(precision_idx_));
+      precision_nested_ = false;
+    }
+  }
+
+#undef __INIT_FORMAT_STREAM
+
 public:
   typename basic_format_parse_context<CharT>::iterator
   parse(basic_format_parse_context<CharT> &pc) {
@@ -719,194 +991,21 @@ public:
     return it;
   }
 
-  // integral specific
-  template <class OutputIt>
-  typename basic_format_context<OutputIt, char>::iterator
-  __format_as_integral(integral auto t,
-                       basic_format_context<OutputIt, CharT> &fc) {
-    char buf[numeric_limits<uintmax_t>::digits10 * 2];
-    auto outIt = fc.out();
-    if (type_ == 'b' || type_ == 'B') {
-      // binary format
-      if (type_ == 'b') {
-        __output(outIt, "0b");
-      } else {
-        __output(outIt, "0B");
-      }
-      auto res = to_chars(begin(buf), end(buf), t, 2);
-      __output(outIt, {begin(buf), res.ptr});
-    } else if (type_ == 'c') {
-      // char
-      // check out of range
-      if (numeric_limits<CharT>::max() < t ||
-          numeric_limits<CharT>::min() > t) {
-        __throw_char_out_of_range();
-      }
-      auto c = static_cast<CharT>(t);
-      __output(outIt, c);
-    } else if (type_ == 'd' || type_ == type_none) {
-      auto res = to_chars(begin(buf), end(buf), t, 10);
-      __output(outIt, {begin(buf), res.ptr});
-    } else if (type_ == 'o') {
-      if (t == 0) {
-        __output(outIt, '0');
-      } else {
-        auto res = to_chars(begin(buf), end(buf), t, 8);
-        __output(outIt, {begin(buf), res.ptr});
-      }
-    } else if (type_ == 'x' || type_ == 'X') {
-      auto res = to_chars(begin(buf), end(buf), t, 16);
-      if (type_ == 'X') {
-        __output_upper(outIt, {begin(buf), res.ptr});
-      } else {
-        __output(outIt, {begin(buf), res.ptr});
-      }
-    } else {
-      __throw_invalid_format();
-    }
-    return outIt;
-  }
-
-  // string / string_view / c-string specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
-  format(const string_view &t, basic_format_context<OutputIt, CharT> &fc) {
-    auto outIt = fc.out();
-    if (type_ == type_none || type_ == 's') {
-      __output(outIt, t);
-    } else {
-      __throw_invalid_format();
-    }
-    return outIt;
-  }
-
-  // plain integral specific
-  template <class OutputIt>
-  typename basic_format_context<OutputIt, char>::iterator
-  format(__format_details::__plain_integral auto t,
-         basic_format_context<OutputIt, CharT> &fc) {
-    return __format_as_integral(t, fc);
-  }
-
-  // bool specific
-  template <class OutputIt>
-  typename basic_format_context<OutputIt, CharT>::iterator
-  format(bool t, basic_format_context<OutputIt, CharT> &fc) {
-    if (type_ == 's' || type_ == type_none) {
-      // TODO: handle locale specific form
-      auto outIt = fc.out();
-      if (t) {
-        __output(outIt, "true");
-      } else {
-        __output(outIt, "false");
-      }
-      return outIt;
-    } else {
-      return format(static_cast<unsigned char>(t), fc);
-    }
-  }
-
-  // char & wchar_t specific
-  template <class OutputIt>
-  typename basic_format_context<OutputIt, CharT>::iterator
-  format(__format_details::__char_t auto t,
-         basic_format_context<OutputIt, CharT> &fc) {
-    if (type_ == type_none || type_ == 'c') {
-      auto outIt = fc.out();
-      __output(outIt, t);
-      return outIt;
-    } else {
-      return __format_as_integral(t, fc);
-    }
-  }
-
-  // floating point specific
-  template <class OutputIt>
-  typename basic_format_context<OutputIt, CharT>::iterator
-  format(floating_point auto t, basic_format_context<OutputIt, CharT> &fc) {
-    char buf[256];
-    // TODO: what if user specifies a big precision
-    if (precision_ != precision_none && precision_ > 128) {
-      precision_ = 128;
-    }
-    to_chars_result res;
-    auto outIt = fc.out();
-    chars_format cfmt;
-    bool uppercase = false;
-    if (type_ == type_none) {
-      if (precision_ != precision_none) {
-        res = to_chars(begin(buf), end(buf), t, chars_format::general,
-                       precision_);
-      } else {
-        res = to_chars(begin(buf), end(buf), t);
-      }
-      goto L_output;
-    } else if (type_ == 'a' || type_ == 'A') {
-      cfmt = chars_format::hex;
-    } else if (type_ == 'e' || type_ == 'E') {
-      cfmt = chars_format::scientific;
-      if (precision_ == precision_none) {
-        precision_ = 6;
-      }
-    } else if (type_ == 'f' || type_ == 'F') {
-      cfmt = chars_format::fixed;
-      if (precision_ == precision_none) {
-        precision_ = 6;
-      }
-    } else if (type_ == 'g' || type_ == 'G') {
-      cfmt = chars_format::general;
-      if (precision_ == precision_none) {
-        precision_ = 6;
-      }
-    } else {
-      __throw_invalid_format();
-    }
-
-    if (precision_ != precision_none) {
-      res = to_chars(begin(buf), end(buf), t, cfmt, precision_);
-    } else {
-      res = to_chars(begin(buf), end(buf), t, cfmt);
-    }
-
-  L_output:
-    if (isupper(type_)) {
-      __output_upper(outIt, {begin(buf), res.ptr});
-    } else {
-      __output(outIt, {begin(buf), res.ptr});
-    }
-    return outIt;
-  }
-
-  // pointer specific
-  template <class OutputIt, class PtrT>
-      requires is_pointer_v<PtrT> ||
-      is_null_pointer_v<PtrT> typename basic_format_context<OutputIt,
-                                                            CharT>::iterator
-      format(PtrT t, basic_format_context<OutputIt, CharT> &fc) {
-#ifdef __intptr_t_defined
-    if (type_ == type_none || type_ == 'p') {
-      char buf[numeric_limits<uintptr_t>::digits10 + 2];
-      auto res =
-          to_chars(begin(buf), end(buf), reinterpret_cast<uintptr_t>(t), 16);
-      auto it = fc.out();
-      __output(it, {begin(buf), res.ptr});
-      return it;
-    } else {
-      __throw_invalid_format();
-    }
-#else
-    // TODO: format when uintptr_t is not defined.
-#endif
+  format(const auto &t, basic_format_context<OutputIt, CharT> &fc) {
+    __format_check(fc);
+    return __format(t, fc);
   }
 };
 
-template <__char_t charT>
-struct __c_string_formatter : __formatter_base<charT> {
-  inline auto format(const char *pstr, auto &fc) {
-    return __formatter_base<charT>::format(string_view(pstr), fc);
+template <__char_t CharT>
+struct __c_string_formatter : __formatter_base<CharT> {
+  inline auto format(const CharT *pstr, auto &fc) {
+    return __formatter_base<CharT>::format(basic_string_view<CharT>(pstr), fc);
   }
-  template <size_t N> inline auto format(const char (&pstr)[N], auto &fc) {
-    return __formatter_base<charT>::format(string_view(pstr, N), fc);
+  template <size_t N> inline auto format(const CharT (&t)[N], auto &fc) {
+    return __formatter_base<CharT>::format(basic_string_view<CharT>(t, N), fc);
   }
 };
 } // namespace __format_details
@@ -973,38 +1072,43 @@ private:
 #endif
   }
 
-  template <class Out, class Char> struct __visitor {
-    basic_format_parse_context<Char> &pc;
-    basic_format_context<Out, Char> &fc;
+  template <class OutIt, class CharT> struct __visitor {
+    basic_format_parse_context<CharT> &pc;
+    basic_format_context<OutIt, CharT> &fc;
 
-    __visitor(basic_format_parse_context<Char> &pc,
-              basic_format_context<Out, Char> &fc)
+    __visitor(basic_format_parse_context<CharT> &pc,
+              basic_format_context<OutIt, CharT> &fc)
         : pc(pc), fc(fc) {}
 
     template <class T> void operator()(T &&v) {
-      typename basic_format_context<Out,
-                                    Char>::template formatter_type<decay_t<T>>
+      typename basic_format_context<OutIt,
+                                    CharT>::template formatter_type<decay_t<T>>
           f;
       pc.advance_to(f.parse(pc));
-      fc.advance_to(f.format(v, fc));
+      fc.advance_to(f.format(std::forward<T>(v), fc));
     }
 
     void operator()(monostate) {}
 
     void operator()(
-        typename basic_format_arg<basic_format_context<Out, Char>>::handle
+        typename basic_format_arg<basic_format_context<OutIt, CharT>>::handle
             handle) {
       handle.format(pc, fc);
     }
   };
 
-  string doit(string_view fmt, format_args args) {
-    string res;                   ///< formatted result
+  template <class OutIt, class CharT>
+  static basic_string<CharT>
+  doit(basic_string_view<CharT> &fmt,
+       basic_format_args<basic_format_context<OutIt, CharT>> &args) {
+    basic_string<CharT> res;      ///< formatted result
     size_t argIdx;                ///< argument index
     size_t argsSize = args.size_; ///< size of args
-    format_context fc(args, back_inserter(res));
+
+    auto inserter = back_inserter(res);
+    basic_format_context<OutIt, CharT> fc(args, inserter);
     // TODO: what is the second argument used for?
-    format_parse_context pc(fmt, argsSize);
+    basic_format_parse_context<CharT> pc(fmt, argsSize);
 
     for (auto it = pc.begin(); it != pc.end();) {
       if (*it != '{' && *it != '}') {
@@ -1094,7 +1198,7 @@ private:
     return res;
   }
 
-  wstring doit(wstring_view fmt, wformat_args args) { return fmt.data(); }
+  //  wstring doit(wstring_view fmt, wformat_args args) { return fmt.data(); }
 };
 } // namespace __format_details
 
@@ -1123,7 +1227,7 @@ inline string vformat(string_view fmt, format_args args) {
 }
 inline wstring vformat(wstring_view fmt, wformat_args args) {
   using namespace __format_details;
-  return __vformat_func().doit(fmt, args);
+  return __vformat_func::doit(fmt, args);
 }
 inline string vformat(const locale &loc, string_view fmt, format_args args) {
   // TODO vformat

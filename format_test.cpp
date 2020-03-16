@@ -39,6 +39,7 @@ TEST_F(BasicFormatTest, BasicFormatTest_BasicType_Test) {
   EXPECT_EQ(format("{}", 42.0), "42.000000");
   EXPECT_EQ(format("{}", 42.0F), "42.000000");
   EXPECT_EQ(format("{}", 42.0L), "42.000000");
+  EXPECT_EQ(format("{}", nullptr), "0");
 }
 
 TEST_F(BasicFormatTest, BasicFormatTest_Indexed_Test) {
@@ -58,4 +59,8 @@ TEST_F(BasicFormatTest, BasicFormatTest_Indexed_Test) {
   EXPECT_THROW(format("{}{1}", 0, 1), format_error);
   EXPECT_THROW(format("{:}{1:}", 0, 1), format_error);
   EXPECT_THROW(format("{0:}{:}", 0, 1), format_error);
+}
+
+TEST_F(BasicFormatTest, BasicFormatTest_FormatSpecific_Test) {
+//  EXPECT_EQ(format("{}"))/
 }
