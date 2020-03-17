@@ -3,6 +3,7 @@
 #if __cplusplus > 201703
 
 #include <array>
+#include <bit>
 #include <concepts>
 #include <iomanip>
 #include <iostream>
@@ -531,10 +532,10 @@ template <class OutputIt, class CharT> class basic_format_context {
 private:
   basic_format_args<basic_format_context> args_;
   OutputIt out_;
-  locale locale_;
+  std::locale locale_;
 
   basic_format_context(basic_format_args<basic_format_context> args,
-                       OutputIt out, locale loc = std::locale())
+                       OutputIt out, std::locale loc = std::locale())
       : args_(std::move(args)), out_(std::move(out)), locale_(std::move(loc)) {}
 
 public:
@@ -769,8 +770,7 @@ private:
     }
 
     if (*it == '0') {
-      // if there is a fill and align, 0 is ignored
-      zero_ = (fill_and_align_ == fill_and_align::none);
+      zero_ = true;
       ++it;
     } else {
       zero_ = false;
@@ -840,19 +840,19 @@ private:
       break;
     case 'a':
     case 'A':
+    case 'b':
+    case 'B':
+    case 'c':
+    case 'd':
     case 'e':
     case 'E':
     case 'f':
     case 'F':
-    case 's':
     case 'g':
     case 'G':
-    case 'p':
-    case 'c':
-    case 'b':
-    case 'B':
-    case 'd':
     case 'o':
+    case 'p':
+    case 's':
     case 'x':
     case 'X':
       type_ = c;
@@ -885,36 +885,103 @@ private:
     fs.imbue(fc.locale());                                                     \
   }
 
+  size_t __integral_length_without_fill_10_part(integral auto t) const {
+    // TODO: provide faster check
+    using unsigned_t = make_unsigned_t<decltype(t)>;
+    unsigned_t ut = static_cast<unsigned_t>(t);
+    size_t n{};
+    while (t) {
+      ++n;
+      t >>= 1;
+    }
+    return n;
+  }
+
+  size_t __integral_length_without_fill(integral auto t) const {
+    using unsigned_t = make_unsigned_t<decltype(t)>;
+    unsigned_t width, base;
+
+    auto ut = static_cast<unsigned_t>(t);
+    width = bit_width(ut);
+
+    switch (type_) {
+    case 'd':
+    case type_none:
+      base = 10;
+      width = __integral_length_without_fill_10_part(t);
+      break;
+    case 'b':
+    case 'B':
+      base = 2;
+      break;
+    case 'x':
+    case 'X':
+      base = 16;
+      width = (width + 3) / 4;
+      break;
+    case 'o':
+      base = 8;
+      width = (width + 2) / 3;
+      break;
+    default:
+      __throw_invalid_format();
+    }
+
+    if (t < 0) {
+      // always set minus sign
+      ++width;
+    } else {
+      switch (sign_) {
+      case sign::none:
+      case sign::minus:
+        break;
+      case sign::plus:
+      case sign::space:
+        ++width;
+        break;
+      }
+    }
+    if (sharp_) {
+      switch (base) {
+      case 2:
+      case 16:
+        width += 2;
+        break;
+      case 10:
+        break;
+      case 8:
+        if (t != 0) {
+          ++width;
+        }
+        break;
+      }
+    }
+
+    return width;
+  }
+
   // integral specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   __format_as_integral(integral auto t,
                        basic_format_context<OutputIt, CharT> &fc) {
+    // check for invalid type char
+    switch (type_) {
+    default:
+      __throw_invalid_format();
+    case 'b':
+    case 'B':
+    case 'c':
+    case 'd':
+    case 'o':
+    case 'x':
+    case 'X':
+    case type_none:
+      break;
+    }
     __INIT_FORMAT_STREAM(fs);
-    if (type_ == 'b' || type_ == 'B') {
-      // binary format is not yet supported by standard io library, output it
-      // directly
-      if (sharp_) {
-        // show base
-        fs << '0' << type_;
-      }
-      // cast to unsigned value to avoid UB
-      using unsigned_int_t = make_unsigned_t<decltype(t)>;
-      unsigned_int_t mask = 1;
-      mask <<= numeric_limits<unsigned_int_t>::digits - 1;
-      bool started = false; // ignore leading 0s
-      while (mask) {
-        bool cur = (mask & static_cast<unsigned_int_t>(t));
-        if (cur) {
-          started = true;
-        }
-        if (started) {
-          fs << (cur ? '1' : '0');
-        }
-        mask >>= 1;
-      }
-    } else if (type_ == 'c') {
-      // char
+    // special check for 'c'
+    if (type_ == 'c') {
       // check out of range first
       if (numeric_limits<CharT>::max() < t ||
           numeric_limits<CharT>::min() > t) {
@@ -922,25 +989,163 @@ private:
       }
       auto c = static_cast<CharT>(t);
       fs << c;
-    } else if (type_ == 'd' || type_ == type_none) {
-      // decimal
-      fs << dec << t;
-    } else if (type_ == 'o') {
-      // octal
-      fs << oct << t;
-    } else if (type_ == 'x' || type_ == 'X') {
-      // hexadecimal
-      if (sharp_) {
-        fs << showbase;
-      }
-      if (type_ == 'X') {
-        fs << uppercase;
-      }
-      fs << hex << t;
     } else {
-      __throw_invalid_format();
-    }
+      // for other types: b/d/o/x
+      using unsigned_t = make_unsigned_t<decltype(t)>;
+      // the value to produce final output, ut is the absolute value of t.
+      unsigned_t ut =
+          t >= 0 ? static_cast<unsigned_t>(t) : -static_cast<unsigned_t>(t);
 
+      bool canFill = fill_and_align_ != fill_and_align::none;
+      size_t lenWithoutFill = 0;
+      if (canFill) {
+        lenWithoutFill = __integral_length_without_fill(t);
+        canFill = lenWithoutFill < width_;
+      }
+      // prefix fill
+      if (fill_and_align_ != fill_and_align::none && canFill) {
+        size_t n; // number to fill now
+        switch (fill_and_align_) {
+        case fill_and_align::none:
+        case fill_and_align::left:
+          n = 0;
+          break;
+        case fill_and_align::right:
+          n = width_ - lenWithoutFill;
+          break;
+        case fill_and_align::center:
+          n = width_ - lenWithoutFill;
+          n /= 2;
+          break;
+        }
+        for (size_t i = 0; i < n; ++i) {
+          fs << fill_char_;
+        }
+      }
+      if (fill_and_align_ != fill_and_align::none) {
+        // ignore 0 if fill and align was set
+        zero_ = false;
+      }
+      if (t < 0) {
+        // for negative numbers, always use a minus sign
+        // then we have to output its absolute value (not work for minimum
+        // value but that is the same behavior as to_chars)
+        fs << '-';
+      } else {
+        // for non negative numbers
+        switch (sign_) {
+        case sign::none:
+        case sign::minus:
+          break;
+        case sign::plus:
+          fs << '+';
+          break;
+        case sign::space:
+          fs << ' ';
+          break;
+        }
+      }
+      // sharp (show base)
+      if (sharp_) {
+        switch (type_) {
+        case 'd':
+        case type_none:
+          // dec: no base prefix
+          break;
+        case 'x':
+          // hex
+          fs << "0x";
+          break;
+        case 'X':
+          // HEX
+          fs << "0X";
+          break;
+        case 'o':
+          // oct
+          if (t) {
+            // at most one leading 0 for octal
+            fs << '0';
+          }
+          break;
+        case 'b':
+          // bin
+          fs << "0b";
+          break;
+        case 'B':
+          fs << "0B";
+          break;
+        default:
+          __throw_invalid_format();
+        }
+      }
+      if (zero_ && canFill) {
+        size_t n = width_ - lenWithoutFill;
+        for (size_t i = 0; i < n; ++i) {
+          fs << '0';
+        }
+      }
+      // core value output
+      switch (type_) {
+      case 'd':
+      case type_none:
+        fs << ut;
+        break;
+      case 'o':
+        fs << oct << ut;
+        break;
+      case 'x':
+        fs << hex << ut;
+        break;
+      case 'X':
+        fs << hex << uppercase << ut;
+        break;
+      case 'b':
+      case 'B':
+        // binary format is not yet supported by standard io library, output it
+        // manually
+        if (!ut) {
+          fs << '0';
+        } else {
+          // use unsigned mask and separate the shift op to prevent ub
+          unsigned_t mask = 1;
+          mask <<= numeric_limits<unsigned_t>::digits - 1;
+          bool started = false; // ignore leading 0s
+          while (mask) {
+            bool cur = (mask & ut);
+            if (cur) {
+              started = true;
+            }
+            if (started) {
+              fs << (cur ? '1' : '0');
+            }
+            mask >>= 1;
+          }
+        }
+        break;
+      default:
+        break;
+      }
+      // suffix fill
+      if (fill_and_align_ != fill_and_align::none && canFill) {
+        size_t n; // number to fill now
+        switch (fill_and_align_) {
+        case fill_and_align::none:
+        case fill_and_align::right:
+          n = 0;
+          break;
+        case fill_and_align::left:
+          n = width_ - lenWithoutFill;
+          break;
+        case fill_and_align::center:
+          n = lenWithoutFill - width_ + 1;
+          n /= 2;
+          break;
+        }
+        for (size_t i = 0; i < n; ++i) {
+          fs << fill_char_;
+        }
+      }
+    }
     return fs.out();
   }
 
@@ -978,9 +1183,9 @@ private:
       // print bool as string
       basic_ostringstream<CharT> oss;
       oss << boolalpha << t;
-      return format(oss.str(), fc);
+      return __format(oss.str(), fc);
     } else {
-      return format(static_cast<unsigned char>(t), fc);
+      return __format(static_cast<unsigned char>(t), fc);
     }
   }
 
@@ -1426,7 +1631,7 @@ private:
 
   template <class OutputIt, class CharT>
   static format_to_n_result<OutputIt> __vformat_to_n(
-      OutputIt &&out, iter_difference_t<OutputIt> n, const locale &loc,
+      OutputIt &out, iter_difference_t<OutputIt> n, const locale &loc,
       const basic_string_view<CharT> &fmt,
       const basic_format_args<basic_format_context<OutputIt, CharT>> &args) {
     using container_t = basic_string<CharT>;
@@ -1466,13 +1671,21 @@ private:
     return it.count();
   }
 
-  template <class OutputIt, class... Args>
+  template <class OutputIt, class CharT, class... Args>
   static format_to_n_result<OutputIt>
-  format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
-              string_view fmt, const Args &... args) {
-    using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
+  format_to_n(OutputIt &out, iter_difference_t<OutputIt> n, const locale &loc,
+              const basic_string_view<CharT> &fmt, const Args &... args) {
+    using context_t = basic_format_context<OutputIt, CharT>;
     return __vformat_to_n(out, n, loc, fmt,
                           make_format_args<context_t>(args...));
+  }
+
+  template <class OutputIt, class CharT, class... Args>
+  static OutputIt format_to(OutputIt out, const locale &loc,
+                            const basic_string_view<CharT> &fmt,
+                            const Args &... args) {
+    using context_t = basic_format_context<OutputIt, CharT>;
+    return vformat_to(out, fmt, make_format_args<context_t>(args...));
   }
 };
 } // namespace __format_details
@@ -1497,10 +1710,12 @@ inline wstring format(const locale &loc, wstring_view fmt,
 }
 
 inline string vformat(string_view fmt, format_args args) {
-  return vformat(locale(), fmt, std::move(args));
+  return __format_details::__public_func::vformat(locale(), fmt,
+                                                  std::move(args));
 }
 inline wstring vformat(wstring_view fmt, wformat_args args) {
-  return vformat(locale(), fmt, std::move(args));
+  return __format_details::__public_func::vformat(locale(), fmt,
+                                                  std::move(args));
 }
 inline string vformat(const locale &loc, string_view fmt, format_args args) {
   return __format_details::__public_func::vformat(loc, fmt, std::move(args));
@@ -1511,39 +1726,41 @@ inline wstring vformat(const locale &loc, wstring_view fmt, wformat_args args) {
 
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, string_view fmt, const Args &... args) {
-  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
-  return vformat_to(out, fmt, make_format_args<context_t>(args...));
+  return __format_details::__public_func::format_to(
+      out, locale(), fmt, std::forward<Args>(args)...);
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, wstring_view fmt,
                           const Args &... args) {
-  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
-  return vformat_to(out, fmt, make_format_args<context_t>(args...));
+  return __format_details::__public_func::format_to(
+      out, locale(), fmt, std::forward<Args>(args)...);
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, const locale &loc, string_view fmt,
                           const Args &... args) {
-  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
-  return vformat_to(out, loc, fmt, make_format_args<context_t>(args...));
+  return __format_details::__public_func::format_to(
+      out, loc, fmt, std::forward<Args>(args)...);
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, const locale &loc, wstring_view fmt,
                           const Args &... args) {
-  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
-  return vformat_to(out, loc, fmt, make_format_args<context_t>(args...));
+  return __format_details::__public_func::format_to(
+      out, loc, fmt, std::forward<Args>(args)...);
 }
 
 template <class OutputIt>
 inline OutputIt
 vformat_to(OutputIt out, string_view fmt,
            format_args_t<type_identity_t<OutputIt>, char> args) {
-  return vformat_to(out, locale(), fmt, std::move(args));
+  return __format_details::__public_func::vformat_to(out, locale(), fmt,
+                                                     std::move(args));
 }
 template <class OutputIt>
 inline OutputIt
 vformat_to(OutputIt out, wstring_view fmt,
            format_args_t<type_identity_t<OutputIt>, wchar_t> args) {
-  return vformat_to(out, locale(), fmt, std::move(args));
+  return __format_details::__public_func::vformat_to(out, locale(), fmt,
+                                                     std::move(args));
 }
 template <class OutputIt>
 inline OutputIt
@@ -1564,13 +1781,15 @@ template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, string_view fmt,
             const Args &... args) {
-  return format_to_n(out, n, locale(), fmt, std::forward<Args>(args)...);
+  return __format_details::__public_func::format_to_n(
+      out, n, locale(), fmt, std::forward<Args>(args)...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, wstring_view fmt,
             const Args &... args) {
-  return format_to_n(out, n, locale(), fmt, std::forward<Args>(args)...);
+  return __format_details::__public_func::format_to_n(
+      out, n, locale(), fmt, std::forward<Args>(args)...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
@@ -1589,11 +1808,13 @@ format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
 
 template <class... Args>
 inline size_t formatted_size(string_view fmt, const Args &... args) {
-  return formatted_size(locale(), fmt, std::forward<Args>(args)...);
+  return __format_details::__public_func::formatted_size(
+      locale(), fmt, std::forward<Args>(args)...);
 }
 template <class... Args>
 inline size_t formatted_size(wstring_view fmt, const Args &... args) {
-  return formatted_size(locale(), fmt, std::forward<Args>(args)...);
+  return __format_details::__public_func::formatted_size(
+      locale(), fmt, std::forward<Args>(args)...);
 }
 template <class... Args>
 inline size_t formatted_size(const locale &loc, string_view fmt,
