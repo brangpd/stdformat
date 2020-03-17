@@ -1,14 +1,15 @@
 #include <gtest/gtest.h>
 
 #include <format>
-#include <chrono>
 using namespace std;
+
+struct BasicFormatTest : testing::Test {};
 
 struct FormatTest : testing::Test {};
 
-struct BasicFormatTest : FormatTest {};
+struct IntegerFormatTest : FormatTest {};
 
-TEST_F(FormatTest, FormatTest_SimpleFormat_Test) {
+TEST_F(BasicFormatTest, BasicFormatTest_SimpleFormat_Test) {
   EXPECT_EQ(format("{}", 42), "42");
 }
 
@@ -61,6 +62,57 @@ TEST_F(BasicFormatTest, BasicFormatTest_Indexed_Test) {
   EXPECT_THROW(format("{0:}{:}", 0, 1), format_error);
 }
 
-TEST_F(BasicFormatTest, BasicFormatTest_FormatSpecific_Test) {
-//  EXPECT_EQ(format("{}"))/
+TEST_F(BasicFormatTest, BasicFormatTest_Specialized_Test) {
+  auto pi = 3.1415926535;
+  char buf[100];
+  sprintf(buf, "%g %a %e %f", pi, pi, pi, pi);
+  EXPECT_EQ(format("{:g} {:a} {:e} {:f}", pi, pi, pi, pi), buf);
+}
+
+TEST_F(IntegerFormatTest, IntegerFormatTest_Basic_Test) {
+  using i8 = int8_t;
+  using i16 = int16_t;
+  using i32 = int32_t;
+  using i64 = int64_t;
+  using u8 = uint8_t;
+  using u16 = uint16_t;
+  using u32 = uint32_t;
+  using u64 = uint64_t;
+
+  auto test_default = [](auto v) { EXPECT_EQ(format("{}", v), to_string(v)); };
+  auto test_default_all_types = [&test_default](auto v) {
+    test_default(i8(v));
+    test_default(i16(v));
+    test_default(i32(v));
+    test_default(i64(v));
+    test_default(u8(v));
+    test_default(u16(v));
+    test_default(u32(v));
+    test_default(u64(v));
+  };
+
+  auto test_default_max_min = [&test_default]<class T>() {
+    test_default(numeric_limits<T>::max());
+    test_default(numeric_limits<T>::min());
+  };
+  auto test_default_max_min_all_types = [&] {
+    test_default_max_min.operator()<i8>();
+    test_default_max_min.operator()<i16>();
+    test_default_max_min.operator()<i32>();
+    test_default_max_min.operator()<i64>();
+    test_default_max_min.operator()<u8>();
+    test_default_max_min.operator()<u16>();
+    test_default_max_min.operator()<u32>();
+    test_default_max_min.operator()<u64>();
+  };
+
+  // default format for all integral types
+  // positive
+  test_default_all_types(42);
+  // negative
+  test_default_all_types(-42);
+  // zero
+  test_default_all_types(0);
+  // max and min values
+  test_default_max_min_all_types();
 }

@@ -123,14 +123,19 @@ class format_error;
 }
 *******************************************************************************/
 
-// synopsis
 namespace std {
 
+namespace __format_details {
+template <class Container> class __formatter_iterator;
+template <class Container>
+using __formatter_output_iterator_t = __formatter_iterator<Container>;
+} // namespace __format_details
+
 template <class Out, class CharT> class basic_format_context;
-using format_context =
-    basic_format_context<std::back_insert_iterator<std::string>, char>;
-using wformat_context =
-    basic_format_context<std::back_insert_iterator<std::wstring>, wchar_t>;
+using format_context = basic_format_context<
+    __format_details::__formatter_output_iterator_t<std::string>, char>;
+using wformat_context = basic_format_context<
+    __format_details::__formatter_output_iterator_t<std::wstring>, wchar_t>;
 
 // [format.args], class template basic_­format_­args
 template <class Context> class basic_format_args;
@@ -237,18 +242,68 @@ make_wformat_args(const Args &... args);
 // implementation
 namespace std {
 namespace __format_details {
-struct __vformat_func;
+// This struct is used to implement some formatting function exported.
+struct __public_func;
+// A base struct for all formatters.
 template <class T> struct __formatter_base;
+
+namespace { // Helper type traits
+// 'plain integral': integral type other than char/wchar_t/bool
+template <class T, bool Int = is_integral_v<T>>
+struct __is_plain_integral : true_type {};
+template <class T> struct __is_plain_integral<T, false> : false_type {};
+template <> struct __is_plain_integral<char> : false_type {};
+template <> struct __is_plain_integral<wchar_t> : false_type {};
+template <> struct __is_plain_integral<char8_t> : false_type {};
+template <> struct __is_plain_integral<char16_t> : false_type {};
+template <> struct __is_plain_integral<char32_t> : false_type {};
+template <> struct __is_plain_integral<bool> : false_type {};
+template <class T>
+constexpr bool __is_plain_integral_v = __is_plain_integral<T>::value;
+template <class T> concept __plain_integral = __is_plain_integral_v<T>;
+
+template <class T> struct __is_bool : false_type {};
+template <class T> constexpr bool __is_bool_v = __is_bool<T>::value;
+template <> struct __is_bool<bool> : true_type {};
+
+template <class T> struct __is_string : false_type {};
+template <> struct __is_string<char *> : true_type {};
+template <> struct __is_string<const char *> : true_type {};
+template <size_t N> struct __is_string<const char[N]> : true_type {};
+template <class CharT, class Traits, class Alloc>
+struct __is_string<basic_string<CharT, Traits, Alloc>> : true_type {};
+template <class CharT, class Traits>
+struct __is_string<basic_string_view<CharT, Traits>> : true_type {};
+template <class T> constexpr auto __is_string_v = __is_string<T>::value;
+
+template <class T, class... Args>
+struct __is_one_of : disjunction<is_same<T, Args>...> {};
+template <class T, class... Args>
+constexpr bool __is_one_of_v = __is_one_of<T, Args...>::value;
+template <class T, class... Args> concept __one_of = __is_one_of_v<T, Args...>;
+template <class T> struct __is_char_t : __is_one_of<T, char, wchar_t> {};
+template <class T> constexpr bool __is_char_t_v = __is_char_t<T>::value;
+template <class T> concept __char_t = __is_char_t_v<T>;
+
+} // namespace
+
 } // namespace __format_details
 
+/**
+ * Exception thrown on formatting errors.
+ */
 class format_error : public runtime_error {
 public:
   explicit format_error(const string &what_arg) : runtime_error(what_arg) {}
   explicit format_error(const char *what_arg) : runtime_error(what_arg) {}
 };
 
+/**
+ * Maintainer of formatting string's parsing state.
+ * @tparam CharT The char type of the formatting string.
+ */
 template <class CharT> class basic_format_parse_context {
-  friend __format_details::__vformat_func;
+  friend __format_details::__public_func;
 
 public:
   using char_type = CharT;
@@ -256,12 +311,13 @@ public:
   using iterator = const_iterator;
 
 private:
-  iterator begin_;
-  iterator end_;
+  iterator begin_; ///< The beginning of the formatting string.
+  iterator end_;   ///< The end of the formatting string.
   enum indexing { unknown, manual, automatic };
-  indexing indexing_;
-  size_t next_arg_id_;
-  size_t num_args_;
+  indexing indexing_;  ///< The indexing type, used to ensure that automatic and
+                       ///< manual indexing are not mixed.
+  size_t next_arg_id_; ///< The next argument id.
+  size_t num_args_;    ///< The number of arguments in total.
 
   [[noreturn]] static void __throw_mixing_indexing() {
 #if __cpp_exceptions
@@ -308,7 +364,12 @@ public:
   }
 };
 
-template <class Context> class basic_format_arg {
+/**
+ * Provide access to arguments.
+ * @tparam FormatContext The format context.
+ * @note The value maintained is accessed through visit_format_arg().
+ */
+template <class FormatContext> class basic_format_arg {
   template <class Context2, class... Args>
   friend __format_arg_store<Context2, Args...>
   make_format_args(const Args &... args);
@@ -321,30 +382,33 @@ template <class Context> class basic_format_arg {
   friend auto visit_format_arg(Visitor &&vis, basic_format_arg<Context2> arg);
 
 private:
-  using char_type = typename Context::char_type;
+  using char_type = typename FormatContext::char_type;
 
 public:
+  /**
+   * Provide type erased access to user defined formatter.
+   */
   class handle {
     const void *ptr_;
-    void (*format_)(basic_format_parse_context<char_type> &, Context &,
+    void (*format_)(basic_format_parse_context<char_type> &, FormatContext &,
                     const void *);
 
     template <class T>
     explicit handle(const T &val) noexcept
         : ptr_(addressof(val)),
           format_([](basic_format_parse_context<char_type> &parse_ctx,
-                     Context &format_ctx, const void *ptr) {
-            typename Context::template formatter_type<T> f;
+                     FormatContext &format_ctx, const void *ptr) {
+            typename FormatContext::template formatter_type<T> f;
             parse_ctx.advance_to(f.parse(parse_ctx));
             format_ctx.advance_to(
                 f.format(*static_cast<const T *>(ptr), format_ctx));
           }) {}
 
-    friend basic_format_arg<Context>;
+    friend basic_format_arg<FormatContext>;
 
   public:
     void format(basic_format_parse_context<char_type> &parse_ctx,
-                Context &format_ctx) const {
+                FormatContext &format_ctx) const {
       return format_(parse_ctx, format_ctx, ptr_);
     }
   };
@@ -353,59 +417,68 @@ private:
   variant<monostate, bool, char_type, int, unsigned int, long long int,
           unsigned long long int, float, double, long double, const char_type *,
           basic_string_view<char_type>, const void *, handle>
-      value;
+      value_;
 
   template <class T> explicit basic_format_arg(const T &v) noexcept {
-    if constexpr (is_same_v<T, bool> || is_same_v<T, char_type>) {
-      value = v;
-    } else if constexpr (is_same_v<T, char> && is_same_v<char_type, wchar_t>) {
-      value = static_cast<wchar_t>(v);
+    using namespace __format_details;
+    if constexpr (__is_one_of_v<T, bool, char_type>) {
+      value_ = v;
+    } else if constexpr (__is_char_t_v<T>) {
+      value_ = static_cast<wchar_t>(v);
     } else if constexpr (is_signed_v<T> && sizeof(T) <= sizeof(int)) {
-      value = static_cast<int>(v);
+      value_ = static_cast<int>(v);
     } else if constexpr (is_unsigned_v<T> &&
                          sizeof(T) <= sizeof(unsigned int)) {
-      value = static_cast<unsigned int>(v);
+      value_ = static_cast<unsigned int>(v);
     } else if constexpr (is_signed_v<T> && sizeof(T) <= sizeof(long long int)) {
-      value = static_cast<long long int>(v);
+      value_ = static_cast<long long int>(v);
     } else if constexpr (is_unsigned_v<T> &&
                          sizeof(T) <= sizeof(unsigned long long int)) {
-      value = static_cast<unsigned long long int>(v);
+      value_ = static_cast<unsigned long long int>(v);
     } else {
-      value = handle(v);
+      value_ = handle(v);
     }
   }
-  explicit basic_format_arg(float n) noexcept : value(n) {}
-  explicit basic_format_arg(double n) noexcept : value(n) {}
-  explicit basic_format_arg(long double n) noexcept : value(n) {}
-  explicit basic_format_arg(const char_type *s) : value(s) {}
+  explicit basic_format_arg(float n) noexcept : value_(n) {}
+  explicit basic_format_arg(double n) noexcept : value_(n) {}
+  explicit basic_format_arg(long double n) noexcept : value_(n) {}
+  explicit basic_format_arg(const char_type *s) : value_(s) {}
 
   template <class traits>
   explicit basic_format_arg(basic_string_view<char_type, traits> s) noexcept
-      : value(s) {}
+      : value_(s) {}
 
   template <class traits, class Allocator>
   explicit basic_format_arg(
       const basic_string<char_type, traits, Allocator> &s) noexcept
-      : value(basic_string_view<char_type>(s.data(), s.size())) {}
+      : value_(basic_string_view<char_type>(s.data(), s.size())) {}
 
   explicit basic_format_arg(nullptr_t) noexcept
-      : value(static_cast<const void *>(nullptr)) {}
+      : value_(static_cast<const void *>(nullptr)) {}
 
   template <class T>
   requires is_void_v<T> explicit basic_format_arg(const T *p) noexcept
-      : value(p) {}
+      : value_(p) {}
 
 public:
-  basic_format_arg() noexcept : value(monostate()) {}
+  basic_format_arg() noexcept : value_(monostate()) {}
 
   explicit operator bool() const noexcept {
-    return !holds_alternative<monostate>(value);
+    return !holds_alternative<monostate>(value_);
   }
 };
 
-template <class Visitor, class Context>
-auto visit_format_arg(Visitor &&vis, basic_format_arg<Context> arg) {
-  return std::visit(std::forward<Visitor>(vis), arg.value);
+/**
+ * Visitation interface for user-defined arguments.
+ * @tparam Visitor The visitor.
+ * @tparam FormatContext The format context.
+ * @param vis The visitor.
+ * @param arg The argument packed by basic_format_arg.
+ * @return Depends on the return value of visitor's operator().
+ */
+template <class Visitor, class FormatContext>
+auto visit_format_arg(Visitor &&vis, basic_format_arg<FormatContext> arg) {
+  return std::visit(std::forward<Visitor>(vis), arg.value_);
 }
 
 template <class Context, class... Args> struct __format_arg_store {
@@ -422,156 +495,200 @@ make_wformat_args(const Args &... args) {
   return {basic_format_arg<wformat_context>(args)...};
 }
 
-template <class Context> class basic_format_args {
-  friend __format_details::__vformat_func;
+/**
+ * Pack basic format arguments.
+ * @tparam FormatContext The format context.
+ */
+template <class FormatContext> class basic_format_args {
+  friend __format_details::__public_func;
 
 private:
   size_t size_;
-  const basic_format_arg<Context> *data_;
+  const basic_format_arg<FormatContext> *data_;
 
 public:
   basic_format_args() noexcept : size_(), data_() {}
 
   template <class... Args>
-  basic_format_args(const __format_arg_store<Context, Args...> &store) noexcept
+  basic_format_args(
+      const __format_arg_store<FormatContext, Args...> &store) noexcept
       : size_(sizeof...(Args)), data_(store.args.data()) {}
 
-  basic_format_arg<Context> get(size_t i) const noexcept {
-    return i < size_ ? data_[i] : basic_format_arg<Context>();
+  basic_format_arg<FormatContext> get(size_t i) const noexcept {
+    return i < size_ ? data_[i] : basic_format_arg<FormatContext>();
   }
 };
 
-template <class Out, class CharT> class basic_format_context {
-  friend __format_details::__vformat_func;
+/**
+ * Maintainer of the formatting state including the output iterator, the locale,
+ * and all arguments.
+ * @tparam OutputIt The output iterator.
+ * @tparam CharT The char type to produce output.
+ */
+template <class OutputIt, class CharT> class basic_format_context {
+  friend __format_details::__public_func;
 
 private:
   basic_format_args<basic_format_context> args_;
-  Out out_;
+  OutputIt out_;
+  locale locale_;
 
-  basic_format_context(basic_format_args<basic_format_context> args, Out out)
-      : args_(std::move(args)), out_(std::move(out)) {}
+  basic_format_context(basic_format_args<basic_format_context> args,
+                       OutputIt out, locale loc = std::locale())
+      : args_(std::move(args)), out_(std::move(out)), locale_(std::move(loc)) {}
 
 public:
-  using iterator = Out;
+  using iterator = OutputIt;
   using char_type = CharT;
   template <class T> using formatter_type = formatter<T, CharT>;
 
   basic_format_arg<basic_format_context> arg(size_t id) const {
     return args_.get(id);
   }
-  std::locale locale() { return std::locale(); }
+  std::locale locale() { return locale_; }
 
   iterator out() { return out_; }
   void advance_to(iterator it) { out_ = it; }
 };
 
 namespace __format_details {
-
-namespace { // helper type traits
-// 'plain integral': integral type other than char/wchar_t/bool
-template <class T, bool Int = is_integral_v<T>>
-struct __is_plain_integral : true_type {};
-template <class T> struct __is_plain_integral<T, false> : false_type {};
-template <> struct __is_plain_integral<char> : false_type {};
-template <> struct __is_plain_integral<wchar_t> : false_type {};
-template <> struct __is_plain_integral<char8_t> : false_type {};
-template <> struct __is_plain_integral<char16_t> : false_type {};
-template <> struct __is_plain_integral<char32_t> : false_type {};
-template <> struct __is_plain_integral<bool> : false_type {};
-template <class T>
-constexpr bool __is_plain_integral_v = __is_plain_integral<T>::value;
-template <class T> concept __plain_integral = __is_plain_integral_v<T>;
-
-template <class T> struct __is_bool : false_type {};
-template <class T> constexpr bool __is_bool_v = __is_bool<T>::value;
-template <> struct __is_bool<bool> : true_type {};
-
-template <class T> struct __is_string : false_type {};
-template <> struct __is_string<char *> : true_type {};
-template <> struct __is_string<const char *> : true_type {};
-template <size_t N> struct __is_string<const char[N]> : true_type {};
-template <class CharT, class Traits, class Alloc>
-struct __is_string<basic_string<CharT, Traits, Alloc>> : true_type {};
-template <class CharT, class Traits>
-struct __is_string<basic_string_view<CharT, Traits>> : true_type {};
-template <class T> constexpr auto __is_string_v = __is_string<T>::value;
-
-template <class T, class... Args>
-struct __is_one_of : disjunction<is_same<T, Args>...> {};
-template <class T, class... Args>
-constexpr bool __is_one_of_v = __is_one_of<T, Args...>::value;
-template <class T, class... Args> concept __one_of = __is_one_of_v<T, Args...>;
-template <class T> concept __char_t = __one_of<T, char, wchar_t>;
-} // namespace
-
 // This implementation use standard output stream to produce results.
-template <class OutIt, class CharT>
-class __format_stream : public basic_ostream<CharT> {
+
+template <class OutputIt, class CharT> class __formatter_stream;
+
+/**
+ * The formatter streambuf for formatter stream use only.
+ */
+template <class OutputIt, class CharT>
+class __formatter_streambuf : public basic_streambuf<CharT> {
 private:
-  class __format_streambuf : public basic_streambuf<CharT> {
-    friend __format_stream;
+  friend __formatter_stream<OutputIt, CharT>;
 
-    using typename basic_streambuf<CharT>::int_type;
-    using typename basic_streambuf<CharT>::traits_type;
-    using typename basic_streambuf<CharT>::off_type;
-    using typename basic_streambuf<CharT>::pos_type;
-    using typename basic_streambuf<CharT>::char_type;
+  using typename basic_streambuf<CharT>::int_type;
+  using typename basic_streambuf<CharT>::traits_type;
+  using typename basic_streambuf<CharT>::off_type;
+  using typename basic_streambuf<CharT>::pos_type;
+  using typename basic_streambuf<CharT>::char_type;
 
-    OutIt it_; ///< The output iterator to the formatting result.
+  OutputIt it_; ///< The output iterator to the formatting result.
 
-    __format_streambuf(OutIt &&outIt) : it_(outIt) {}
+  explicit __formatter_streambuf(OutputIt outIt) : it_(std::move(outIt)) {}
 
-    // Override all virtual functions and make it useful for output.
-  protected:
-    void imbue(const locale &__loc) override {}
-    int sync() override { return 0; }
-    streamsize showmanyc() override { return -1; }
-    int_type underflow() override { return traits_type::eof(); }
-    int_type pbackfail(int_type __c) override { return traits_type::eof(); }
-    basic_streambuf<CharT> *setbuf(char_type *, std::streamsize) override {
-      return this;
-    }
-    pos_type seekoff(off_type, ios_base::seekdir, ios_base::openmode) override {
-      return pos_type(off_type(-1));
-    }
-    pos_type seekpos(pos_type, ios_base::openmode) override {
-      return pos_type(off_type(-1));
-    }
-    streamsize xsgetn(char_type *, streamsize) override { return 0; }
-    int_type uflow() override { return traits_type::eof(); }
-    streamsize xsputn(const char_type *s, streamsize n) override {
-      for (streamsize i = 0; i < n; ++i) {
-        *it_++ = *s++;
-      }
-      return n;
-    }
-    int_type overflow(int_type __c) override { return traits_type::eof() + 1; }
-  } buf_; ///< The formatter stream's buffer.
+  // Override all virtual functions and make it useful for output.
+protected:
+  void imbue(const locale &__loc) override {}
+  int sync() override { return 0; }
+  streamsize showmanyc() override { return -1; }
+  int_type underflow() override { return traits_type::eof(); }
+  int_type pbackfail(int_type __c) override { return traits_type::eof(); }
+  basic_streambuf<CharT> *setbuf(char_type *, streamsize) override {
+    return this;
+  }
+  pos_type seekoff(off_type, ios_base::seekdir, ios_base::openmode) override {
+    return pos_type(off_type(-1));
+  }
+  pos_type seekpos(pos_type, ios_base::openmode) override {
+    return pos_type(off_type(-1));
+  }
+  streamsize xsgetn(char_type *, streamsize) override { return 0; }
+  int_type uflow() override { return traits_type::eof(); }
+  streamsize xsputn(const char_type *s, streamsize n) override {
+    // Assume that the output stream accept every characters.
+    // In case setting the limit is needed, it is the output iterator's
+    // responsibility to operate as no-op. See __formatter_iterator.
+    copy_n(s, n, it_);
+    return n;
+  }
+  int_type overflow(int_type __c) override {
+    // Output never overflow.
+    return traits_type::eof() + 1;
+  }
+};
+
+template <class OutputIt, class CharT>
+class __formatter_stream : public basic_ostream<CharT> {
+private:
+  using __formatter_streambuf_t = __formatter_streambuf<OutputIt, CharT>;
+  __formatter_streambuf_t buf_; ///< The formatter stream's buffer.
 
   /**
    * Construct a format stream with the output iterator.
    * @param outIt The output iterator.
    */
-  __format_stream(OutIt &&outIt)
-      : basic_ostream<CharT>(&buf_), buf_(std::forward<OutIt>(outIt)) {}
-  __format_stream(OutIt &&outIt, const locale &loc)
-      : basic_ostream<CharT>(&buf_), buf_(std::forward<OutIt>(outIt)) {
-    this->imbue(loc);
-  }
+  explicit __formatter_stream(OutputIt &&outIt)
+      : basic_ostream<CharT>(&buf_), buf_(std::forward<OutputIt>(outIt)) {}
 
   /**
    * Get the current output iterator.
    * @return The output iterator.
    */
-  auto __it() const { return buf_.it_; }
+  auto out() const { return buf_.it_; }
 
   friend __formatter_base<CharT>;
 };
 
+/**
+ * The formatter iterator is an output iterator that provides a wrapper of the
+ * underlying iterator (say the back insert iterator). It behaves as if the
+ * underlying iterator is being used directly, except that it allows objects of
+ * derived classes to determine whether the output operation should be finally
+ * executed.
+ * @tparam Container The container, namely the basic string to produce
+ * formatting output.
+ */
+template <class Container> class __formatter_iterator {
+  friend __format_details::__public_func;
+
+protected:
+  using __underlying_iterator = back_insert_iterator<Container>;
+
+private:
+  __underlying_iterator dest_; ///< The wrapped iterator.
+  bool dest_enable_; ///< Disabled when no iterator is wrapped, and the output
+                     ///< operation does nothing.
+
+protected:
+  explicit __formatter_iterator() : dest_enable_(false) {}
+  explicit __formatter_iterator(__underlying_iterator dest)
+      : dest_(std::move(dest)), dest_enable_(true) {}
+  /**
+   * Determine whether the output operation should be executed.
+   * @return True if the output operation is expected, in which case new
+   * character would be assigned and iterator would be advanced. Specify false
+   * to disable the operation.
+   */
+  virtual bool operate() { return true; }
+
+public:
+  typedef output_iterator_tag iterator_category;
+  typedef void value_type;
+  typedef void difference_type;
+  typedef void pointer;
+  typedef void reference;
+
+  __formatter_iterator &operator=(const typename Container::value_type &c) {
+    if (operate()) {
+      if (dest_enable_) {
+        dest_.operator=(c);
+      }
+    }
+    return *this;
+  }
+  __formatter_iterator &operator=(const __formatter_iterator &other) {
+    dest_ = other.dest_;
+    dest_enable_ = other.dest_enable_;
+    return *this;
+  }
+  // Those are all no-op operations for output iterators, only used to remain
+  // consistency.
+  __formatter_iterator &operator*() { return *this; }
+  __formatter_iterator &operator++() { return *this; }
+  __formatter_iterator &operator++(int) { return *this; }
+};
+
 template <class CharT> struct __formatter_base {
-  // fill_and_align_(optional) sign_(optional) sharp_(optional) zero_(optional)
-  // width_(optional) precision_(optional) locale_specific_(optional)
-  // type_(optional)
+  // The format spec consists of zero or more of the following fields in order:
+  // fill_and_align_ sign_ sharp_ zero_ width_ precision_ locale_specific_ type_
 private:
   enum class fill_and_align {
     none,
@@ -585,7 +702,6 @@ private:
     minus, ///< '-'
     space, ///< ' '
   };
-  ios::fmtflags fmtflags_{};
   fill_and_align fill_and_align_ : 2;
   sign sign_ : 2;
   bool sharp_ : 1;           ///< '#'
@@ -600,15 +716,14 @@ private:
     int width_;
     int width_idx_;
   }; ///< if using nested width, the index is stored in
-     ///< width_ and should be replaced by the number of
+     ///< width_idx_ and should be replaced by the number of
      ///< that index later. same idea for precision.
   union {
     int precision_;
     int precision_idx_;
   };
 
-private:
-  auto __parse_fill_and_align(auto &it) {
+  void __parse_fill_and_align(auto &it) {
     auto opt = *(it + 1);
     switch (opt) {
     case '<':
@@ -628,7 +743,7 @@ private:
     it += 2;
   }
 
-  auto __parse_sign_sharp_zero(auto &it) {
+  void __parse_sign_sharp_zero(auto &it) {
     switch (*it) {
     case ' ':
       sign_ = sign::space;
@@ -671,7 +786,7 @@ private:
     return res;
   }
 
-  auto __parse_width_precision(auto &pc, auto &it) {
+  void __parse_width_precision(auto &pc, auto &it) {
     // parse helper for both width and precision
     auto parse_part = [&pc, &it](auto &field) -> bool /*nested*/ {
       bool nested = false;
@@ -709,7 +824,7 @@ private:
     }
   }
 
-  auto __parse_locale_specific(auto &it) {
+  void __parse_locale_specific(auto &it) {
     if (*it == 'L') {
       locale_specific_ = true;
       ++it;
@@ -718,7 +833,7 @@ private:
     }
   }
 
-  auto __parse_type(auto &it) {
+  void __parse_type(auto &it) {
     switch (auto c = *it) {
     default:
       type_ = type_none;
@@ -746,7 +861,7 @@ private:
     }
   }
 
-  static void __throw_char_out_of_range() {
+  [[noreturn]] static void __throw_char_out_of_range() {
 #if __cpp_exceptions
     throw format_error("char out of range");
 #else
@@ -763,8 +878,9 @@ private:
 #endif
   }
 
+  // Helper macro to init the format stream with locale.
 #define __INIT_FORMAT_STREAM(fs)                                               \
-  __format_stream<OutputIt, CharT> fs(fc.out());                               \
+  __formatter_stream<OutputIt, CharT> fs(fc.out());                            \
   if (locale_specific_) {                                                      \
     fs.imbue(fc.locale());                                                     \
   }
@@ -786,8 +902,15 @@ private:
       using unsigned_int_t = make_unsigned_t<decltype(t)>;
       unsigned_int_t mask = 1;
       mask <<= numeric_limits<unsigned_int_t>::digits - 1;
+      bool started = false; // ignore leading 0s
       while (mask) {
-        fs << ((mask & static_cast<unsigned_int_t>(t)) ? '1' : '0');
+        bool cur = (mask & static_cast<unsigned_int_t>(t));
+        if (cur) {
+          started = true;
+        }
+        if (started) {
+          fs << (cur ? '1' : '0');
+        }
         mask >>= 1;
       }
     } else if (type_ == 'c') {
@@ -807,13 +930,18 @@ private:
       fs << oct << t;
     } else if (type_ == 'x' || type_ == 'X') {
       // hexadecimal
-      fs << (sharp_ ? showbase : noshowbase)
-         << (type_ == 'x' ? nouppercase : uppercase) << hex << t;
+      if (sharp_) {
+        fs << showbase;
+      }
+      if (type_ == 'X') {
+        fs << uppercase;
+      }
+      fs << hex << t;
     } else {
       __throw_invalid_format();
     }
 
-    return fs.__it();
+    return fs.out();
   }
 
   // string / string_view / c-string specific
@@ -828,7 +956,7 @@ private:
       } else {
         fs << t;
       }
-      return fs.__it();
+      return fs.out();
     } else {
       __throw_invalid_format();
     }
@@ -864,7 +992,7 @@ private:
     if (type_ == type_none || type_ == 'c') {
       __INIT_FORMAT_STREAM(fs);
       fs << t;
-      return fs.__it();
+      return fs.out();
     } else {
       return __format_as_integral(t, fc);
     }
@@ -887,8 +1015,6 @@ private:
         // digits in total for those who has its exponent less than 100 and 13
         // digits otherwise. Therefore, a value with less than 5 digits before
         // the radix point would be treated as fixed, and the others scientific.
-        // (But I am quite curious about why they determined not to just use the
-        // default float produced by standard io.)
         if (100000 > t - numeric_limits<decltype(t)>::epsilon()) {
           fs << fixed;
         } else {
@@ -923,7 +1049,7 @@ private:
 
   L_output:
     fs << t;
-    return fs.__it();
+    return fs.out();
   }
 
   // pointer specific
@@ -932,17 +1058,18 @@ private:
       is_null_pointer_v<PtrT> typename basic_format_context<OutputIt,
                                                             CharT>::iterator
       __format(PtrT t, basic_format_context<OutputIt, CharT> &fc) {
-#ifdef __intptr_t_defined
     if (type_ == type_none || type_ == 'p') {
       __INIT_FORMAT_STREAM(fs);
+#ifdef __intptr_t_defined
       fs << hex << reinterpret_cast<uintptr_t>(t);
-      return fs.__it();
+#else
+      // The behavior is implementation defined if uintptr_t is not defined.
+      fs << hex << reinterpret_cast<uintmax_t>(t);
+#endif
+      return fs.out();
     } else {
       __throw_invalid_format();
     }
-#else
-    // TODO: format when uintptr_t is not defined.
-#endif
   }
 
   void __format_check(auto &fc) {
@@ -951,6 +1078,7 @@ private:
       width_ = visit_format_arg(
           []<class T>(T && v)->int {
             if constexpr (is_integral_v<T>) {
+              // width should be positive
               if (v > 0 && v <= numeric_limits<decltype(width_)>::max()) {
                 return v;
               }
@@ -964,6 +1092,7 @@ private:
       precision_ = visit_format_arg(
           []<class T>(T && v)->int {
             if constexpr (is_integral_v<T>) {
+              // precision should be non-negative
               if (v >= 0 && v <= numeric_limits<decltype(precision_)>::max()) {
                 return v;
               }
@@ -999,18 +1128,43 @@ public:
   }
 };
 
+/**
+ * Formatter for C string to produce string output instead of the pointer's
+ * value.
+ */
 template <__char_t CharT>
 struct __c_string_formatter : __formatter_base<CharT> {
   inline auto format(const CharT *pstr, auto &fc) {
     return __formatter_base<CharT>::format(basic_string_view<CharT>(pstr), fc);
   }
-  template <size_t N> inline auto format(const CharT (&t)[N], auto &fc) {
-    return __formatter_base<CharT>::format(basic_string_view<CharT>(t, N), fc);
-  }
 };
 } // namespace __format_details
 
 ///@{ Standard specializations for basic types and string types
+/*******************************************************************************
+// basic char types
+template<> struct formatter<char, char>;
+template<> struct formatter<char, wchar_t>;
+template<> struct formatter<wchar_t, wchar_t>;
+
+// for CharT as char & wchar_t:
+// basic string types
+template<> struct formatter<CharT*, CharT>;
+template<> struct formatter<const CharT*, CharT>;
+template<std::size_t N> struct formatter<const CharT[N], CharT>;
+template<class Traits, class Alloc>
+  struct formatter<std::basic_string<CharT, Traits, Alloc>, CharT>;
+template<class Traits>
+  struct formatter<std::basic_string_view<CharT, Traits>, CharT>;
+
+// arithmetic types
+template<> struct formatter<ArithmeticT, CharT>;
+
+// pointer types
+template<> struct formatter<std::nullptr_t, CharT>;
+template<> struct formatter<void*, CharT>;
+template<> struct formatter<const void*, CharT>;
+*******************************************************************************/
 template <>
 struct formatter<char, char> : __format_details::__formatter_base<char> {};
 template <>
@@ -1050,7 +1204,7 @@ struct formatter<PtrT, CharT> : __format_details::__formatter_base<CharT> {};
 ///@}
 
 namespace __format_details {
-struct __vformat_func {
+struct __public_func {
 private:
   friend string std::vformat(string_view fmt, format_args args);
   friend wstring std::vformat(wstring_view fmt, wformat_args args);
@@ -1072,48 +1226,106 @@ private:
 #endif
   }
 
-  template <class OutIt, class CharT> struct __visitor {
+  /**
+   * Visitor for basic types or user-defined classes.
+   * @tparam OutputIt The output iterator.
+   * @tparam CharT The char type of output.
+   */
+  template <class OutputIt, class CharT> struct __visitor {
     basic_format_parse_context<CharT> &pc;
-    basic_format_context<OutIt, CharT> &fc;
+    basic_format_context<OutputIt, CharT> &fc;
 
     __visitor(basic_format_parse_context<CharT> &pc,
-              basic_format_context<OutIt, CharT> &fc)
+              basic_format_context<OutputIt, CharT> &fc)
         : pc(pc), fc(fc) {}
 
+    // No-op for monostate.
+    void operator()(monostate) {}
+
+    // Built-in basic types.
     template <class T> void operator()(T &&v) {
-      typename basic_format_context<OutIt,
-                                    CharT>::template formatter_type<decay_t<T>>
-          f;
+      using formatter_type = typename basic_format_context<
+          OutputIt, CharT>::template formatter_type<remove_cvref_t<T>>;
+      formatter_type f;
       pc.advance_to(f.parse(pc));
       fc.advance_to(f.format(std::forward<T>(v), fc));
     }
 
-    void operator()(monostate) {}
-
+    // Redirect for user defined formatter. See basic_format_arg::handle.
     void operator()(
-        typename basic_format_arg<basic_format_context<OutIt, CharT>>::handle
+        typename basic_format_arg<basic_format_context<OutputIt, CharT>>::handle
             handle) {
       handle.format(pc, fc);
     }
   };
 
-  template <class OutIt, class CharT>
-  static basic_string<CharT>
-  doit(basic_string_view<CharT> &fmt,
-       basic_format_args<basic_format_context<OutIt, CharT>> &args) {
-    basic_string<CharT> res;      ///< formatted result
+  /**
+   * Counter wrapper for formatted_size's. It does not write any character but
+   * only counts how many times it is operated.
+   */
+  template <class Container>
+  class __counter_formatter_iterator : public __formatter_iterator<Container> {
+    friend __format_details::__public_func;
+
+  private:
+    size_t count_; ///< The counter.
+
+  protected:
+    bool operate() override {
+      ++count_;
+      // disallow all operations
+      return false;
+    }
+
+  public:
+    __counter_formatter_iterator()
+        : __formatter_iterator<Container>(), count_(0) {}
+    size_t count() const { return count_; }
+  };
+
+  /**
+   * Limited wrapper for format_n's. It limits the maximum operations of output.
+   */
+  template <class Container>
+  class __limited_formatter_iterator : public __formatter_iterator<Container> {
+    friend __format_details::__public_func;
+
+  private:
+    size_t avail_; ///< Available operations left.
+
+  protected:
+    using __underlying_iterator =
+        typename __formatter_iterator<Container>::__underlying_iterator;
+
+    bool operate() override {
+      // disallow further operations when avail_ becomes zero
+      if (avail_ > 0) {
+        --avail_;
+        return true;
+      }
+      return false;
+    }
+
+    __limited_formatter_iterator(__underlying_iterator &&it, size_t maxOp)
+        : __formatter_iterator<Container>(it), avail_(maxOp) {}
+    size_t avail() const { return avail_; }
+  };
+
+  template <class OutputIt, class CharT>
+  static OutputIt vformat_to(
+      OutputIt &out, const locale &loc, const basic_string_view<CharT> &fmt,
+      const basic_format_args<basic_format_context<OutputIt, CharT>> &args) {
     size_t argIdx;                ///< argument index
     size_t argsSize = args.size_; ///< size of args
 
-    auto inserter = back_inserter(res);
-    basic_format_context<OutIt, CharT> fc(args, inserter);
+    basic_format_context<OutputIt, CharT> fc(args, out, loc);
     // TODO: what is the second argument used for?
     basic_format_parse_context<CharT> pc(fmt, argsSize);
 
     for (auto it = pc.begin(); it != pc.end();) {
       if (*it != '{' && *it != '}') {
         // characters other than '{' and '}' are just copied directly
-        res += *it++;
+        *out++ = *it++;
         continue;
       }
       if (*it == '{') {
@@ -1124,7 +1336,7 @@ private:
         __throw_invalid_format_if(it == pc.end());
         if (*it == '{') {
           // convert "{{" to "{" and copy to the output directly
-          res += *it++;
+          *out++ = *it++;
           continue;
         }
         // now it is one char past the beginning '{'
@@ -1191,14 +1403,77 @@ private:
         ++it;
         __throw_invalid_format_if(it == fmt.end() || *it != '}');
         // copy the '}' directly
-        res += *it++;
+        *out++ = *it++;
         continue;
       }
     }
+
+    return fc.out();
+  }
+
+  template <class OutputIt, class CharT>
+  static basic_string<CharT> vformat(
+      const locale &loc, const basic_string_view<CharT> &fmt,
+      const basic_format_args<basic_format_context<OutputIt, CharT>> &args) {
+    using container_t = basic_string<CharT>;
+    using iterator_t = __formatter_iterator<container_t>;
+    container_t res{}; // formatted result
+    auto inserter = back_inserter(res);
+    iterator_t it(inserter); // wrap inserter with formatter iterator
+    vformat_to(it, loc, fmt, args);
     return res;
   }
 
-  //  wstring doit(wstring_view fmt, wformat_args args) { return fmt.data(); }
+  template <class OutputIt, class CharT>
+  static format_to_n_result<OutputIt> __vformat_to_n(
+      OutputIt &&out, iter_difference_t<OutputIt> n, const locale &loc,
+      const basic_string_view<CharT> &fmt,
+      const basic_format_args<basic_format_context<OutputIt, CharT>> &args) {
+    using container_t = basic_string<CharT>;
+    using iterator_t = __limited_formatter_iterator<container_t>;
+    container_t res{};
+    auto N = static_cast<size_t>(max(0, n)); // disallow negative n
+    auto inserter = back_inserter(res);
+    iterator_t it(inserter, N); // wrap insert iterator with limited iterator
+    it = vformat_to(it, loc, fmt, args);
+    auto written = N - it.avail();
+  }
+
+  template <class CharT> class __counter_empty_container {
+  public:
+    using value_type = CharT;
+  };
+
+  template <class CharT, class... Args>
+  static size_t formatted_size(const locale &loc,
+                               const basic_string_view<CharT> &fmt,
+                               const Args &... args) {
+    using container_t = __counter_empty_container<CharT>;
+    using iterator_t = __counter_formatter_iterator<container_t>;
+    using context_t = basic_format_context<iterator_t, CharT>;
+    return __vformatted_size(loc, fmt, make_format_args<context_t>(args...));
+  }
+
+  template <class OutputIt, class Context, class CharT>
+  static size_t __vformatted_size(const locale &loc,
+                                  const basic_string_view<CharT> &fmt,
+                                  const basic_format_args<Context> &args) {
+    using container_t = __counter_empty_container<CharT>;
+    using iterator_t = __counter_formatter_iterator<container_t>;
+    using context_t = basic_format_context<iterator_t, CharT>;
+    iterator_t it{};
+    it = vformat_to(it, loc, fmt, args);
+    return it.count();
+  }
+
+  template <class OutputIt, class... Args>
+  static format_to_n_result<OutputIt>
+  format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
+              string_view fmt, const Args &... args) {
+    using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
+    return __vformat_to_n(out, n, loc, fmt,
+                          make_format_args<context_t>(args...));
+  }
 };
 } // namespace __format_details
 
@@ -1222,85 +1497,116 @@ inline wstring format(const locale &loc, wstring_view fmt,
 }
 
 inline string vformat(string_view fmt, format_args args) {
-  using namespace __format_details;
-  return __vformat_func().doit(fmt, args);
+  return vformat(locale(), fmt, std::move(args));
 }
 inline wstring vformat(wstring_view fmt, wformat_args args) {
-  using namespace __format_details;
-  return __vformat_func::doit(fmt, args);
+  return vformat(locale(), fmt, std::move(args));
 }
 inline string vformat(const locale &loc, string_view fmt, format_args args) {
-  // TODO vformat
-  return fmt.data();
+  return __format_details::__public_func::vformat(loc, fmt, std::move(args));
 }
 inline wstring vformat(const locale &loc, wstring_view fmt, wformat_args args) {
-  // TODO vformat
-  return fmt.data();
+  return __format_details::__public_func::vformat(loc, fmt, std::move(args));
 }
 
-template <class Out, class... Args>
-inline Out format_to(Out out, string_view fmt, const Args &... args) {
-  using context = basic_format_context<Out, decltype(fmt)::value_type>;
-  return vformat_to(out, fmt, make_format_args<context>(args...));
+template <class OutputIt, class... Args>
+inline OutputIt format_to(OutputIt out, string_view fmt, const Args &... args) {
+  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
+  return vformat_to(out, fmt, make_format_args<context_t>(args...));
 }
-template <class Out, class... Args>
-inline Out format_to(Out out, wstring_view fmt, const Args &... args) {
-  using context = basic_format_context<Out, decltype(fmt)::value_type>;
-  return vformat_to(out, fmt, make_format_args<context>(args...));
+template <class OutputIt, class... Args>
+inline OutputIt format_to(OutputIt out, wstring_view fmt,
+                          const Args &... args) {
+  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
+  return vformat_to(out, fmt, make_format_args<context_t>(args...));
 }
-template <class Out, class... Args>
-inline Out format_to(Out out, const locale &loc, string_view fmt,
-                     const Args &... args) {
-  using context = basic_format_context<Out, decltype(fmt)::value_type>;
-  return vformat_to(out, loc, fmt, make_format_args<context>(args...));
+template <class OutputIt, class... Args>
+inline OutputIt format_to(OutputIt out, const locale &loc, string_view fmt,
+                          const Args &... args) {
+  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
+  return vformat_to(out, loc, fmt, make_format_args<context_t>(args...));
 }
-template <class Out, class... Args>
-inline Out format_to(Out out, const locale &loc, wstring_view fmt,
-                     const Args &... args) {
-  using context = basic_format_context<Out, decltype(fmt)::value_type>;
-  return vformat_to(out, loc, fmt, make_format_args<context>(args...));
+template <class OutputIt, class... Args>
+inline OutputIt format_to(OutputIt out, const locale &loc, wstring_view fmt,
+                          const Args &... args) {
+  using context_t = basic_format_context<OutputIt, decltype(fmt)::value_type>;
+  return vformat_to(out, loc, fmt, make_format_args<context_t>(args...));
 }
 
-template <class Out>
-inline Out vformat_to(Out out, string_view fmt,
-                      format_args_t<type_identity_t<Out>, char> args) {}
-template <class Out>
-inline Out vformat_to(Out out, wstring_view fmt,
-                      format_args_t<type_identity_t<Out>, wchar_t> args) {}
-template <class Out>
-inline Out vformat_to(Out out, const locale &loc, string_view fmt,
-                      format_args_t<type_identity_t<Out>, char> args) {}
-template <class Out>
-inline Out vformat_to(Out out, const locale &loc, wstring_view fmt,
-                      format_args_t<type_identity_t<Out>, wchar_t> args) {}
+template <class OutputIt>
+inline OutputIt
+vformat_to(OutputIt out, string_view fmt,
+           format_args_t<type_identity_t<OutputIt>, char> args) {
+  return vformat_to(out, locale(), fmt, std::move(args));
+}
+template <class OutputIt>
+inline OutputIt
+vformat_to(OutputIt out, wstring_view fmt,
+           format_args_t<type_identity_t<OutputIt>, wchar_t> args) {
+  return vformat_to(out, locale(), fmt, std::move(args));
+}
+template <class OutputIt>
+inline OutputIt
+vformat_to(OutputIt out, const locale &loc, string_view fmt,
+           format_args_t<type_identity_t<OutputIt>, char> args) {
+  return __format_details::__public_func::vformat_to(out, loc, fmt,
+                                                     std::move(args));
+}
+template <class OutputIt>
+inline OutputIt
+vformat_to(OutputIt out, const locale &loc, wstring_view fmt,
+           format_args_t<type_identity_t<OutputIt>, wchar_t> args) {
+  return __format_details::__public_func::vformat_to(out, loc, fmt,
+                                                     std::move(args));
+}
 
-template <class Out, class... Args>
-inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                           string_view fmt,
-                                           const Args &... args) {}
-template <class Out, class... Args>
-inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                           wstring_view fmt,
-                                           const Args &... args) {}
-template <class Out, class... Args>
-inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                           const locale &loc, string_view fmt,
-                                           const Args &... args) {}
-template <class Out, class... Args>
-inline format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                           const locale &loc, wstring_view fmt,
-                                           const Args &... args) {}
+template <class OutputIt, class... Args>
+inline format_to_n_result<OutputIt>
+format_to_n(OutputIt out, iter_difference_t<OutputIt> n, string_view fmt,
+            const Args &... args) {
+  return format_to_n(out, n, locale(), fmt, std::forward<Args>(args)...);
+}
+template <class OutputIt, class... Args>
+inline format_to_n_result<OutputIt>
+format_to_n(OutputIt out, iter_difference_t<OutputIt> n, wstring_view fmt,
+            const Args &... args) {
+  return format_to_n(out, n, locale(), fmt, std::forward<Args>(args)...);
+}
+template <class OutputIt, class... Args>
+inline format_to_n_result<OutputIt>
+format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
+            string_view fmt, const Args &... args) {
+  return __format_details::__public_func::format_to_n(
+      out, n, loc, fmt, std::forward<Args>(args)...);
+}
+template <class OutputIt, class... Args>
+inline format_to_n_result<OutputIt>
+format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
+            wstring_view fmt, const Args &... args) {
+  return __format_details::__public_func::format_to_n(
+      out, n, loc, fmt, std::forward<Args>(args)...);
+}
 
 template <class... Args>
-inline size_t formatted_size(string_view fmt, const Args &... args) {}
+inline size_t formatted_size(string_view fmt, const Args &... args) {
+  return formatted_size(locale(), fmt, std::forward<Args>(args)...);
+}
 template <class... Args>
-inline size_t formatted_size(wstring_view fmt, const Args &... args) {}
+inline size_t formatted_size(wstring_view fmt, const Args &... args) {
+  return formatted_size(locale(), fmt, std::forward<Args>(args)...);
+}
 template <class... Args>
 inline size_t formatted_size(const locale &loc, string_view fmt,
-                             const Args &... args) {}
+                             const Args &... args) {
+  return __format_details::__public_func::formatted_size(
+      loc, fmt, std::forward<Args>(args)...);
+}
 template <class... Args>
 inline size_t formatted_size(const locale &loc, wstring_view fmt,
-                             const Args &... args) {}
+                             const Args &... args) {
+  return __format_details::__public_func::formatted_size(
+      loc, fmt, std::forward<Args>(args)...);
+}
 } // namespace std
 
 #endif // C++20
