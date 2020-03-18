@@ -1190,7 +1190,7 @@ private:
         // digits in total for those who has its exponent less than 100 and 13
         // digits otherwise. Therefore, a value with less than 5 digits before
         // the radix point would be treated as fixed, and the others scientific.
-        if (static_cast<decltype(t)>(1e5 - 1e-6) > t) {
+        if (static_cast<decltype(t)>(1e5 - 1e-7) > t) {
           ss << fixed;
         } else {
           ss << scientific;
