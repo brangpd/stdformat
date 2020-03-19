@@ -862,7 +862,7 @@ private:
   }
 
   [[noreturn]] static void __throw_char_out_of_range() {
-    __THROW_FORMAT_ERROR("char out of range")
+    __THROW_FORMAT_ERROR("char out of range");
   }
 
   [[noreturn]] static void
