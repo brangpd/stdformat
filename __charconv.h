@@ -2,10 +2,9 @@
 
 #if __cplusplus >= 201703
 
-// The current libstdc++ library misses floating point to_chars implementations.
+// The floating point to_chars implementations is missing in current libstdc++
+// library misses.
 namespace std {
-struct to_chars_result;
-enum class chars_format;
 extern to_chars_result to_chars(char *first, char *last, float value);
 extern to_chars_result to_chars(char *first, char *last, double value);
 extern to_chars_result to_chars(char *first, char *last, long double value);

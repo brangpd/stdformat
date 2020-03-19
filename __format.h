@@ -2,18 +2,6 @@
 
 #if __cplusplus > 201703
 
-#include <array>
-#include <bit>
-#include <concepts>
-#include <iomanip>
-#include <iostream>
-#include <limits>
-#include <locale>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <variant>
-
 /* synopsis ********************************************************************
 namespace std {
 // [format.functions], formatting functions
@@ -124,6 +112,28 @@ class format_error;
 }
 *******************************************************************************/
 
+#include <array>
+#include <bit>
+#include <cmath>
+#include <concepts>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <locale>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+
+#ifdef __cpp_exceptions
+#define __THROW_FORMAT_ERROR(why) throw std::format_error(why)
+#define __IMPLEMENTATION_BUG()                                                 \
+  throw runtime_error("implementation bug at " __FILE__ + ":"s +               \
+                      to_string(__LINE__))
+#else
+#define __THROW_FORMAT_ERROR(why) std::exit(1)
+#define __IMPLEMENTATION_BUG() std::exit(2)
+#endif
 namespace std {
 
 namespace __format_details {
@@ -321,11 +331,7 @@ private:
   size_t num_args_;    ///< The number of arguments in total.
 
   [[noreturn]] static void __throw_mixing_indexing() {
-#if __cpp_exceptions
-    throw format_error("mixing of automatic and manual argument indexing");
-#else
-    terminate();
-#endif
+    __THROW_FORMAT_ERROR("mixing of automatic and manual argument indexing");
   }
 
 public:
@@ -566,18 +572,14 @@ template <class Container> class __formatter_iterator {
   friend __format_details::__public_func;
 
 protected:
-  using __underlying_iterator = back_insert_iterator<Container>;
-  using __container_type = typename __underlying_iterator::container_type;
+  using __container_type = Container;
 
 private:
-  __underlying_iterator dest_; ///< The wrapped iterator.
-  bool dest_enable_; ///< Disabled when no iterator is wrapped, and the output
-                     ///< operation does nothing.
+  Container *container_;
 
 protected:
-  explicit __formatter_iterator() : dest_enable_(false) {}
-  explicit __formatter_iterator(__underlying_iterator dest)
-      : dest_(std::move(dest)), dest_enable_(true) {}
+  explicit __formatter_iterator() : container_() {}
+  explicit __formatter_iterator(Container &c) : container_(&c) {}
   /**
    * Determine whether the output operation should be executed.
    * @return True if the output operation is expected, in which case new
@@ -596,15 +598,14 @@ public:
   __formatter_iterator &
   operator=(const typename __container_type::value_type &c) {
     if (operate()) {
-      if (dest_enable_) {
-        dest_ = c;
+      if (container_) {
+        container_->push_back(c);
       }
     }
     return *this;
   }
   __formatter_iterator &operator=(const __formatter_iterator &other) {
-    dest_ = other.dest_;
-    dest_enable_ = other.dest_enable_;
+    container_ = other.container_;
     return *this;
   }
   // Those are all no-op operations for output iterators, only used to remain
@@ -649,9 +650,6 @@ private:
   size_t avail_; ///< Available operations left.
 
 protected:
-  using __underlying_iterator =
-      typename __formatter_iterator<Container>::__underlying_iterator;
-
   bool operate() override {
     // disallow further operations when avail_ becomes zero
     if (avail_ > 0) {
@@ -662,8 +660,8 @@ protected:
   }
 
 public:
-  __limited_formatter_iterator(__underlying_iterator &&it, size_t maxOp)
-      : __formatter_iterator<Container>(it), avail_(maxOp) {}
+  __limited_formatter_iterator(Container &c, size_t maxOp)
+      : __formatter_iterator<Container>(c), avail_(maxOp) {}
   size_t avail() const { return avail_; }
 };
 
@@ -706,9 +704,10 @@ private:
   bool zero_ : 1;            ///< '0'
   bool locale_specific_ : 1; ///< 'L'
   CharT fill_char_;
-  enum { width_none = -1, precision_none = -1, type_none = 0 };
+  enum : int { width_none = -1, precision_none = -1, type_none = 0 };
   bool width_nested_ : 1;
   bool precision_nested_ : 1;
+  bool negative_ : 1;
   CharT type_;
   union {
     int width_;
@@ -885,93 +884,49 @@ private:
     // special check for 'b', since the standard io manipulators do not
     // support binary presentation.
     using unsigned_t = make_unsigned_t<decltype(t)>;
-    unsigned_t ut = t > 0 ? t : static_cast<unsigned_t>(-t);
-
-    size_t originWidth = bit_width(ut); // origin bit width
-    size_t width =
-        originWidth;     // the formatted width without fills (to be calculated)
-    size_t leading0 = 0; // the number of leading zeros if any
-    if (sharp_) {
-      width += 2; // the 0b prefix
-    }
-    if (t < 0 || sign_ == sign::plus || sign_ == sign::space) {
-      ++width; // always include the sign char
-    }
-    if (zero_) {
-      if (width < width_) {
-        leading0 = width_ - width;
-        width = width_;
-      }
-    }
-    // now we have calculated the full length without fill chars, calculate the
-    // fillL and fillR
-
-    // the number of char to be filled on the left and right sides
-    size_t fillL = 0;
-    size_t fillR = 0;
-    if (width < width_) {
-      auto distance = width_ - width;
-      switch (align_) {
-      case align::left:
-        fillR = distance;
-        break;
-      case align::right:
-        fillL = distance;
-        break;
-      case align ::center:
-        fillL = distance / 2;
-        fillR = distance - fillL;
-        break;
-      default:
-        break;
-      }
-    }
-
-    auto out = fc.out();
-
-    // fill left
-    for (size_t i = 0; i < fillL; ++i) {
-      *out++ = fill_char_;
-    }
-    // medium part: core binary number
-    // sign
+    unsigned_t ut = t >= 0 ? t : static_cast<unsigned_t>(-t);
+    // prepare to redirect to string format
+    CharT buf[numeric_limits<unsigned_t>::digits + 1 /*sign*/ + 2 /*0B*/];
+    auto bufit = buf;
     if (t < 0) {
-      *out++ = '-';
+      *bufit++ = '-';
     } else {
       if (sign_ == sign::plus) {
-        *out++ = '+';
+        *bufit++ = '+';
       } else if (sign_ == sign::space) {
-        *out++ = ' ';
+        *bufit++ = ' ';
       }
     }
-    // sharp
+    size_t width;
     if (sharp_) {
-      *out++ = '0';
-      *out++ = type_; // 0b or 0B
+      *bufit++ = '0';
+      *bufit++ = type_;
     }
-    // zero
+    if (align_ != align::none) {
+      zero_ = false;
+    }
     if (zero_) {
-      for (size_t i = 0; i < leading0; ++i) {
-        *out++ = '0';
-      }
+      width = numeric_limits<unsigned_t>::digits;
+    } else {
+      width = bit_width(ut);
     }
-    // binary body
-    if (0 != ut) {
+    if (0 != width) {
       unsigned_t mask = 1U;
-      mask <<= originWidth - 1;
+      mask <<= width - 1;
       while (mask) {
-        *out++ = (ut & mask ? '1' : '0');
+        *bufit++ = (ut & mask ? '1' : '0');
         mask >>= 1;
       }
     } else {
-      *out++ = '0';
-    }
-    // fill right
-    for (size_t i = 0; i < fillR; ++i) {
-      *out++ = fill_char_;
+      *bufit++ = '0';
     }
 
-    return out;
+    // redirect to string format
+    if (align_ == align::none) {
+      align_ = align::right;
+    }
+    type_ = 's';
+    return __format(basic_string_view(buf, bufit), fc);
   }
 
   template <class OutputIt>
@@ -1030,8 +985,15 @@ private:
         ss.tellp(),
         [&ss, &fc] {
           auto out = fc.out();
-          for (CharT c; ss.read(&c, 1);) {
-            *out++ = c;
+          if constexpr (is_same_v<decay_t<decltype(out)>,
+                                  __formatter_iterator<CharT>>) {
+
+          } else {
+            for (CharT buf[64]; auto read = ss.readsome(buf, size(buf));) {
+              for (auto it = buf, ite = buf + read; it != ite;) {
+                *out++ = *it++;
+              }
+            }
           }
           return out;
         },
@@ -1051,29 +1013,19 @@ private:
         fc);
   }
 
-  // integral specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
-  __format_as_integral(integral auto t,
-                       basic_format_context<OutputIt, CharT> &fc) {
-    switch (type_) {
-    case 'b':
-    case 'B':
-      return __format_as_integral_b(t, fc);
-    case 'c':
-      return __format_as_integral_c(t, fc);
-    }
-    // for other types: d/o/x
+  __format_as_integral_odx(integral auto t,
+                           basic_format_context<OutputIt, CharT> &fc) {
+    // for other types: o/d/x
     auto out = fc.out();
     using unsigned_t = make_unsigned_t<decltype(t)>;
     // the value to produce final output, ut is the absolute value of t.
     // because the standard io treat the oct / hex form of negative integers
     // as the real binary form which does not meet the formatting library's
     // requirement.
-    unsigned_t ut =
-        t >= 0 ? static_cast<unsigned_t>(t) : static_cast<unsigned_t>(-t);
 
-    basic_stringstream<CharT> ss; // achieve the raw number without fills
+    basic_stringstream<CharT> ss{}; // achieve the raw number without fills
 
     if (sharp_) {
       ss << showbase;
@@ -1116,9 +1068,26 @@ private:
         ss << ' ';
       }
     }
+    unsigned_t ut = t < 0 ? static_cast<unsigned_t>(-t) : t;
     ss << ut;
 
     return __fill_and_output_num(ss, fc);
+  }
+
+  // integral specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format_as_integral(integral auto t,
+                       basic_format_context<OutputIt, CharT> &fc) {
+    switch (type_) {
+    case 'b':
+    case 'B':
+      return __format_as_integral_b(t, fc);
+    case 'c':
+      return __format_as_integral_c(t, fc);
+    default:
+      return __format_as_integral_odx(t, fc);
+    }
   }
 
   // string / string_view / c-string specific
@@ -1151,7 +1120,7 @@ private:
   __format(bool t, basic_format_context<OutputIt, CharT> &fc) {
     if (type_ == 's' || type_ == type_none) {
       // print bool as string
-      basic_stringstream<CharT> ss;
+      basic_stringstream<CharT> ss{};
       ss << boolalpha << t;
       return __format(ss.str(), fc);
     } else {
@@ -1223,6 +1192,22 @@ private:
     }
 
   L_output:
+    if (!isfinite(t)) {
+      // for inf and nan, the positive sign is not added by standard io library
+      if (signbit(t) == 0) {
+        switch (sign_) {
+        case sign::none:
+        case sign::minus:
+          break;
+        case sign::plus:
+          ss << '+';
+          break;
+        case sign::space:
+          ss << ' ';
+          break;
+        }
+      }
+    }
     ss << t;
     return __fill_and_output_num(ss, fc);
   }
@@ -1251,29 +1236,29 @@ private:
     if (width_nested_) {
       width_ = visit_format_arg(
           []<class T>(T && v)->int {
-            if constexpr (is_integral_v<T>) {
+            if constexpr (is_integral_v<decay_t<T>>) {
               // width should be positive
               if (v > 0 && v <= numeric_limits<decltype(width_)>::max()) {
                 return v;
               }
+              __THROW_FORMAT_ERROR("width should be positive");
             }
-            throw format_error("invalid width");
+            __THROW_FORMAT_ERROR("invalid width");
           },
           fc.arg(width_idx_));
       width_nested_ = false;
     }
     if (precision_nested_) {
       precision_ = visit_format_arg(
-          [](auto &&v) -> int {
-            if constexpr (is_integral_v<decay_t<decltype(v)>>) {
+          []<class T>(T && v)->int {
+            if constexpr (is_integral_v<decay_t<T>>) {
               // precision should be non-negative
               if (v >= 0 && v <= numeric_limits<decltype(precision_)>::max()) {
                 return v;
               }
-              throw format_error("precision should be non-negative");
-            } else {
-              throw format_error("invalid precision");
+              __THROW_FORMAT_ERROR("precision should be non-negative");
             }
+            __THROW_FORMAT_ERROR("invalid precision");
           },
           fc.arg(precision_idx_));
       precision_nested_ = false;
@@ -1398,11 +1383,7 @@ private:
   }
 
   [[noreturn]] static void __throw_invalid_format() {
-#if __cpp_exceptions
-    throw format_error("invalid format");
-#else
-    terminate();
-#endif
+    __THROW_FORMAT_ERROR("invalid format");
   }
 
   /**
@@ -1504,13 +1485,6 @@ private:
         if (*it == ':') {
           ++it;
         }
-        // now it is at one char past ':' (if exists) or at '}' (if no spec)
-        //        while (ite != pc.end() && *ite != '}') {
-        //          // head ite till '}'
-        //          ++ite;
-        //        }
-        //        __throw_invalid_format_if(ite == pc.end());
-        //        // now ite is at '}'
 
         // find the corresponding arg idx
         if (argIdxSet) {
@@ -1544,9 +1518,8 @@ private:
       const basic_format_args<basic_format_context<OutputIt, CharT>> &args) {
     using container_t = basic_string<CharT>;
     using iterator_t = __formatter_iterator<container_t>;
-    container_t res{}; // formatted result
-    auto inserter = back_inserter(res);
-    iterator_t it(inserter); // wrap inserter with formatter iterator
+    container_t res{};  // formatted result
+    iterator_t it(res); // wrap inserter with formatter iterator
     vformat_to(it, loc, fmt, args);
     return res;
   }
@@ -1560,8 +1533,7 @@ private:
     using iterator_t = __limited_formatter_iterator<container_t>;
     container_t res{};
     auto N = static_cast<size_t>(max(0, n)); // disallow negative n
-    auto inserter = back_inserter(res);
-    iterator_t it(inserter, N); // wrap insert iterator with limited iterator
+    iterator_t it(res, N); // wrap insert iterator with limited iterator
     it = vformat_to(it, loc, fmt, args);
     auto written = N - it.avail();
   }
@@ -1751,5 +1723,7 @@ inline size_t formatted_size(const locale &loc, wstring_view fmt,
       loc, fmt, std::forward<Args>(args)...);
 }
 } // namespace std
+
+#undef __THROW_FORMAT_ERROR
 
 #endif // C++20

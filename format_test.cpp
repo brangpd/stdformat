@@ -1,13 +1,20 @@
 #include <gtest/gtest.h>
 
+#include <charconv>
 #include <format>
+#include <iterator>
+#include <string>
 using namespace std;
+
+#define EXPECT_FORMAT_ERROR(exp) EXPECT_THROW(exp, format_error)
 
 struct BasicFormatTest : testing::Test {};
 
 struct FormatTest : testing::Test {};
 
 struct IntegerFormatTest : FormatTest {};
+
+struct FloatingPointFormatTest : FormatTest {};
 
 TEST_F(BasicFormatTest, BasicFormatTest_SimpleFormat_Test) {
   EXPECT_EQ(format("{}", 42), "42");
@@ -57,9 +64,9 @@ TEST_F(BasicFormatTest, BasicFormatTest_Indexed_Test) {
   EXPECT_EQ(format("{0:}{0:}{0:}", 1, 2, 3), "111");
   EXPECT_EQ(format("{2:}{1:}{0}", 1, 2, 3), "321");
   // error: mixed use of auto indexing and manual indexing
-  EXPECT_THROW(format("{}{1}", 0, 1), format_error);
-  EXPECT_THROW(format("{:}{1:}", 0, 1), format_error);
-  EXPECT_THROW(format("{0:}{:}", 0, 1), format_error);
+  EXPECT_FORMAT_ERROR(format("{}{1}", 0, 1));
+  EXPECT_FORMAT_ERROR(format("{:}{1:}", 0, 1));
+  EXPECT_FORMAT_ERROR(format("{0:}{:}", 0, 1));
 }
 
 TEST_F(BasicFormatTest, BasicFormatTest_Specialized_Test) {
@@ -79,7 +86,9 @@ TEST_F(IntegerFormatTest, IntegerFormatTest_Basic_Test) {
   using u32 = uint32_t;
   using u64 = uint64_t;
 
-  auto test_default = [](auto v) { EXPECT_EQ(format("{}", v), to_string(v)); };
+  auto test_default = [](auto v) {
+    EXPECT_EQ(format("{}", v), to_string(v)) << v;
+  };
   auto test_default_all_types = [&test_default](auto v) {
     test_default(i8(v));
     test_default(i16(v));
@@ -109,10 +118,146 @@ TEST_F(IntegerFormatTest, IntegerFormatTest_Basic_Test) {
   // default format for all integral types
   // positive
   test_default_all_types(42);
+  test_default_all_types(1);
   // negative
   test_default_all_types(-42);
+  test_default_all_types(-1);
   // zero
   test_default_all_types(0);
   // max and min values
   test_default_max_min_all_types();
+
+  auto to_chars_base = [](auto v, int base) -> string {
+    char buf[100];
+    auto &&[ptr, ec] = to_chars(begin(buf), end(buf), v, base);
+    if (ec != errc{}) {
+      throw;
+    }
+    return string(buf, ptr);
+  };
+  auto test_for_integer_type_spec = [&to_chars_base](int base) {
+    auto test_base = [&to_chars_base](auto v, int base) {
+      const char *fmt;
+      switch (base) {
+      case 2:
+        fmt = "{:b}";
+        break;
+      case 8:
+        fmt = "{:o}";
+        break;
+      case 10:
+        fmt = "{:d}";
+        break;
+      case 16:
+        fmt = "{:x}";
+        break;
+      default:
+        throw;
+      }
+      EXPECT_EQ(format(fmt, v), to_chars_base(v, base))
+          << "v: " << v << " base: " << base;
+    };
+    test_base(42, base);
+    test_base(-42, base);
+    test_base(0, base);
+    test_base(1, base);
+    test_base(-1, base);
+    test_base(numeric_limits<uintmax_t>::max(), base);
+    test_base(numeric_limits<uintmax_t>::max() - 1, base);
+    test_base(numeric_limits<intmax_t>::min(), base);
+    test_base(numeric_limits<intmax_t>::min() + 1, base);
+  };
+
+  auto test_chars = [] {
+    auto test_char = [](int v) {
+      if (v > numeric_limits<char>::max() || v < numeric_limits<char>::min()) {
+        EXPECT_FORMAT_ERROR(format("{:c}", (int)v)) << v;
+      } else {
+        EXPECT_EQ(format("{:c}", (int)v), format("{}", (char)v)) << v;
+      }
+    };
+    test_char(42);
+    test_char(0);
+    test_char(1);
+    test_char(-1);
+    test_char(numeric_limits<char>::min());
+    test_char(numeric_limits<char>::min() + 1);
+    test_char(numeric_limits<char>::min() - 1);
+    test_char(numeric_limits<char>::max());
+    test_char(numeric_limits<char>::max() - 1);
+    test_char(numeric_limits<char>::max() + 1);
+    test_char(127);
+    test_char(128);
+    test_char(129);
+    test_char(254);
+    test_char(255);
+    test_char(256);
+  };
+
+  // type spec:
+  // binary
+  test_for_integer_type_spec(2);
+  // char
+  test_chars();
+  // decimal
+  test_for_integer_type_spec(10);
+  // octal
+  test_for_integer_type_spec(8);
+  // hexadecimal
+  test_for_integer_type_spec(16);
+}
+
+TEST_F(FloatingPointFormatTest, FloatingPointFormatTest_DefaultFloat_Test) {
+  auto test_edge = []<floating_point T>(T) {
+    constexpr const char *tstr =
+        is_same_v<T, float> ? "float"
+                            : is_same_v<T, double> ? "double" : "long double";
+    char buf[100];
+    char *bufe;
+    T v;
+    v = T(1e5) - numeric_limits<T>::epsilon() - T(1e-5);
+    bufe = to_chars(begin(buf), end(buf), v).ptr;
+    EXPECT_EQ(format("{}", v), string(buf, bufe)) << tstr;
+    v = T(1e5) - numeric_limits<T>::epsilon() - T(1e-6);
+    bufe = to_chars(begin(buf), end(buf), v).ptr;
+    EXPECT_EQ(format("{}", v), string(buf, bufe)) << tstr;
+    v = T(1e5) - numeric_limits<T>::epsilon() - T(1e-7);
+    bufe = to_chars(begin(buf), end(buf), v).ptr;
+    EXPECT_EQ(format("{}", v), string(buf, bufe)) << tstr;
+  };
+  test_edge((float){});
+  test_edge((double){});
+  test_edge((long double){});
+}
+
+TEST_F(FloatingPointFormatTest, FloatingPointFormatTest_SpecialValues_Test) {
+  auto test_special = []<floating_point T>(T) {
+    constexpr const char *tstr =
+        is_same_v<T, float> ? "float"
+                            : is_same_v<T, double> ? "double" : "long double";
+    EXPECT_EQ(format("{}", numeric_limits<T>::quiet_NaN()), "nan") << tstr;
+    EXPECT_EQ(format("{:+}", numeric_limits<T>::quiet_NaN()), "+nan") << tstr;
+    EXPECT_EQ(format("{:-}", numeric_limits<T>::quiet_NaN()), "nan") << tstr;
+    EXPECT_EQ(format("{: }", numeric_limits<T>::quiet_NaN()), " nan") << tstr;
+    EXPECT_EQ(format("{}", -numeric_limits<T>::quiet_NaN()), "-nan") << tstr;
+    EXPECT_EQ(format("{:+}", -numeric_limits<T>::quiet_NaN()), "-nan") << tstr;
+    EXPECT_EQ(format("{:-}", -numeric_limits<T>::quiet_NaN()), "-nan") << tstr;
+    EXPECT_EQ(format("{: }", -numeric_limits<T>::quiet_NaN()), "-nan") << tstr;
+    EXPECT_EQ(format("{}", numeric_limits<T>::infinity()), "inf") << tstr;
+    EXPECT_EQ(format("{:+}", numeric_limits<T>::infinity()), "+inf") << tstr;
+    EXPECT_EQ(format("{:-}", numeric_limits<T>::infinity()), "inf") << tstr;
+    EXPECT_EQ(format("{: }", numeric_limits<T>::infinity()), " inf") << tstr;
+    EXPECT_EQ(format("{}", -numeric_limits<T>::infinity()), "-inf") << tstr;
+    EXPECT_EQ(format("{:+}", -numeric_limits<T>::infinity()), "-inf") << tstr;
+    EXPECT_EQ(format("{:-}", -numeric_limits<T>::infinity()), "-inf") << tstr;
+    EXPECT_EQ(format("{: }", -numeric_limits<T>::infinity()), "-inf") << tstr;
+    EXPECT_EQ(format("{:`<5}", numeric_limits<T>::quiet_NaN()), "nan``") << tstr;
+    EXPECT_EQ(format("{:`^5}", numeric_limits<T>::quiet_NaN()), "`nan`") << tstr;
+    EXPECT_EQ(format("{:`>5}", numeric_limits<T>::quiet_NaN()), "``nan") << tstr;
+    EXPECT_EQ(format("{:`<5.0}", numeric_limits<T>::quiet_NaN()), "nan``") << tstr;
+  };
+
+  test_special((float){});
+  test_special((double){});
+  test_special((long double){});
 }

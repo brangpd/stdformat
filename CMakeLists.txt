@@ -14,7 +14,7 @@ set_target_properties(stdformat PROPERTIES LINKER_LANGUAGE CXX)
 
 add_library(ATestClass ATestClass.cpp)
 add_executable(main main.cpp)
-target_link_libraries(main ATestClass)
+target_link_libraries(main ATestClass stdformat)
 
 find_package(GTest REQUIRED)
 enable_testing()
