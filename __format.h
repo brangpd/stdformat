@@ -118,6 +118,7 @@ class format_error;
 #include <concepts>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <locale>
 #include <string>
@@ -861,20 +862,12 @@ private:
   }
 
   [[noreturn]] static void __throw_char_out_of_range() {
-#if __cpp_exceptions
-    throw format_error("char out of range");
-#else
-    terminate();
-#endif
+    __THROW_FORMAT_ERROR("char out of range")
   }
 
   [[noreturn]] static void
   __throw_invalid_format(const char *why = "invalid format") {
-#if __cpp_exceptions
-    throw format_error(why);
-#else
-    terminate();
-#endif
+    __THROW_FORMAT_ERROR(why);
   }
 
   template <class OutputIt>

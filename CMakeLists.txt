@@ -9,7 +9,7 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 add_library(stdformat
 		format
 		charconv __charconv.cpp
-		chrono)
+		)
 set_target_properties(stdformat PROPERTIES LINKER_LANGUAGE CXX)
 
 add_library(ATestClass ATestClass.cpp)
