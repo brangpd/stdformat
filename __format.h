@@ -274,20 +274,6 @@ template <class T>
 constexpr bool __is_plain_integral_v = __is_plain_integral<T>::value;
 template <class T> concept __plain_integral = __is_plain_integral_v<T>;
 
-template <class T> struct __is_bool : false_type {};
-template <class T> constexpr bool __is_bool_v = __is_bool<T>::value;
-template <> struct __is_bool<bool> : true_type {};
-
-template <class T> struct __is_string : false_type {};
-template <> struct __is_string<char *> : true_type {};
-template <> struct __is_string<const char *> : true_type {};
-template <size_t N> struct __is_string<const char[N]> : true_type {};
-template <class CharT, class Traits, class Alloc>
-struct __is_string<basic_string<CharT, Traits, Alloc>> : true_type {};
-template <class CharT, class Traits>
-struct __is_string<basic_string_view<CharT, Traits>> : true_type {};
-template <class T> constexpr auto __is_string_v = __is_string<T>::value;
-
 template <class T, class... Args>
 struct __is_one_of : disjunction<is_same<T, Args>...> {};
 template <class T, class... Args>
@@ -295,7 +281,7 @@ constexpr bool __is_one_of_v = __is_one_of<T, Args...>::value;
 template <class T, class... Args> concept __one_of = __is_one_of_v<T, Args...>;
 template <class T> struct __is_char_t : __is_one_of<T, char, wchar_t> {};
 template <class T> constexpr bool __is_char_t_v = __is_char_t<T>::value;
-template <class T> concept __char_t = __is_char_t_v<T>;
+template <class T> concept __char_t = __one_of<T, char, wchar_t>;
 template <class T> concept __integral = is_integral_v<T>;
 template <class T> concept __floating_point = is_floating_point_v<T>;
 } // namespace
@@ -686,7 +672,6 @@ private:
   enum : int { width_none = -1, precision_none = -1, type_none = 0 };
   bool width_nested_ : 1;
   bool precision_nested_ : 1;
-  bool negative_ : 1;
   CharT type_;
   union {
     int width_;
@@ -950,14 +935,20 @@ private:
     return out;
   }
 
-  auto __fill_and_output_num(basic_stringstream<CharT> &ss, auto &fc) {
+  auto __fill_and_output(basic_stringstream<CharT> &ss, auto &fc) {
     return __fill_and_output_wrap(
         ss.tellp(),
         [&ss, &fc] {
           auto out = fc.out();
-          for (CharT buf[64]; auto read = ss.readsome(buf, size(buf));) {
+          enum { buflen = 96 };
+          CharT buf[buflen];
+          while (true) {
+            auto read = ss.readsome(buf, size(buf));
             for (auto it = buf, ite = buf + read; it != ite;) {
               *out++ = *it++;
+            }
+            if (read < buflen) {
+              break;
             }
           }
           return out;
@@ -965,7 +956,7 @@ private:
         fc);
   }
 
-  auto __fill_and_output_str(const basic_string_view<CharT> &sv, auto &fc) {
+  auto __fill_and_output(const basic_string_view<CharT> &sv, auto &fc) {
     return __fill_and_output_wrap(
         sv.size(),
         [&sv, &fc] {
@@ -1036,7 +1027,7 @@ private:
     unsigned_t ut = t < 0 ? static_cast<unsigned_t>(-t) : t;
     ss << ut;
 
-    return __fill_and_output_num(ss, fc);
+    return __fill_and_output(ss, fc);
   }
 
   // integral specific
@@ -1062,9 +1053,9 @@ private:
            basic_format_context<OutputIt, CharT> &fc) {
     if (type_ == type_none || type_ == 's') {
       if (precision_ != precision_none) {
-        return __fill_and_output_str(t.substr(0, precision_), fc);
+        return __fill_and_output(t.substr(0, precision_), fc);
       } else {
-        return __fill_and_output_str(t, fc);
+        return __fill_and_output(t, fc);
       }
     } else {
       __throw_invalid_format();
@@ -1087,7 +1078,11 @@ private:
       // print bool as string
       basic_stringstream<CharT> ss{};
       ss << boolalpha << t;
-      return __format(ss.str(), fc);
+      type_ = 's';
+      if (align_ == align::none) {
+        align_ = align::right;
+      }
+      return __fill_and_output(ss, fc);
     } else {
       return __format(static_cast<unsigned char>(t), fc);
     }
@@ -1175,7 +1170,7 @@ private:
       }
     }
     ss << t;
-    return __fill_and_output_num(ss, fc);
+    return __fill_and_output(ss, fc);
   }
 
   // pointer specific
@@ -1197,6 +1192,7 @@ private:
     }
   }
 
+  // c-string specific
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   __format(const CharT *cstr, basic_format_context<OutputIt, CharT> &fc) {
@@ -1328,6 +1324,7 @@ struct formatter<PtrT, CharT> : __format_details::__formatter_base<CharT> {};
 ///@}
 
 namespace __format_details {
+// Helper struct to implement global format functions.
 struct __public_func {
 private:
   friend string std::vformat(const locale &, string_view fmt, format_args args);
