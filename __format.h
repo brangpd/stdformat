@@ -982,6 +982,9 @@ private:
     // requirement.
 
     basic_stringstream<CharT> ss{}; // achieve the raw number without fills
+    if (locale_specific_) {
+      ss.imbue(fc.locale());
+    }
 
     if (sharp_) {
       ss << showbase;
@@ -1077,6 +1080,9 @@ private:
     if (type_ == 's' || type_ == type_none) {
       // print bool as string
       basic_stringstream<CharT> ss{};
+      if (locale_specific_) {
+        ss.imbue(fc.locale());
+      }
       ss << boolalpha << t;
       type_ = 's';
       if (align_ == align::none) {
@@ -1108,6 +1114,9 @@ private:
   __format(__format_details::__floating_point auto t,
            basic_format_context<OutputIt, CharT> &fc) {
     basic_stringstream<CharT> ss{};
+    if (locale_specific_) {
+      ss.imbue(fc.locale());
+    }
     if (type_ == type_none) {
       if (precision_ != precision_none) {
         ss << defaultfloat;
