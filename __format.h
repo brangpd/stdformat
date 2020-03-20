@@ -407,7 +407,7 @@ public:
         : ptr_(addressof(val)),
           format_([](basic_format_parse_context<char_type> &parse_ctx,
                      FormatContext &format_ctx, const void *ptr) {
-            typename FormatContext::template formatter_type<T> f;
+            typename FormatContext::template formatter_type<decay_t<T>> f;
             parse_ctx.advance_to(f.parse(parse_ctx));
             format_ctx.advance_to(
                 f.format(*static_cast<const T *>(ptr), format_ctx));
@@ -1242,8 +1242,6 @@ private:
     }
   }
 
-#undef __INIT_FORMAT_STREAM
-
 public:
   typename basic_format_parse_context<CharT>::iterator
   parse(basic_format_parse_context<CharT> &pc) {
@@ -1383,7 +1381,7 @@ private:
         : pc(pc), fc(fc) {}
 
     // Parse-only visit.
-    void operator()(monostate) {
+    void operator()(const monostate &) {
       // for monostates, only parse the formatting string
       using formatter_type =
           formatter<CharT, CharT>; // the formatter's type does not matter
