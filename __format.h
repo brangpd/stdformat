@@ -115,6 +115,7 @@ class format_error;
 #include <array>
 #include <bit>
 #include <cmath>
+#include <forward_list>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -137,16 +138,14 @@ class format_error;
 namespace std {
 
 namespace __format_details {
-template <class Container, class CharT = typename Container::value_type>
-class __formatter_iterator;
+template <class CharT> class __formatter_iterator;
 } // namespace __format_details
 
 template <class Out, class CharT> class basic_format_context;
 using format_context =
-    basic_format_context<__format_details::__formatter_iterator<std::string>,
-                         char>;
+    basic_format_context<__format_details::__formatter_iterator<char>, char>;
 using wformat_context =
-    basic_format_context<__format_details::__formatter_iterator<std::wstring>,
+    basic_format_context<__format_details::__formatter_iterator<wchar_t>,
                          wchar_t>;
 
 // [format.args], class template basic_­format_­args
@@ -570,6 +569,137 @@ public:
 
 namespace __format_details {
 /**
+ * The buf to store utf8 characters for width calculation.
+ * Note: wchar_t is not implemented. In fact wchar_t does not work correctly in
+ * my machine... Also wchar_t seems not widely used so I plan not to implement
+ * it. To implement the wchar_t a locale codecvt is needed but this guy is not
+ * working as well. To summarize, never use wchar_t / wstring.
+ */
+template <class CharT> class __unicode_buf;
+template <> class __unicode_buf<char> {
+private:
+  char buf_[4]{};
+  uint8_t cur_{};
+
+public:
+  operator bool() const { return code(); }
+  uint32_t code() const {
+    uint32_t res;
+    switch (cur_) {
+    case 0:
+      return 0;
+    case 1:
+      return (buf_[0] & 0b1111111);
+    case 2:
+      return ((buf_[0] & 0b11111) << 6) | (buf_[1] & 0b111111);
+    case 3:
+      res = buf_[0] & 0b1111;
+      res <<= 6;
+      res |= buf_[1] & 0b111111;
+      res <<= 6;
+      res |= buf_[2] & 0b111111;
+      return res;
+    case 4:
+      res = buf_[0] & 0b1111;
+      res <<= 6;
+      res |= buf_[1] & 0b111111;
+      res <<= 6;
+      res |= buf_[2] & 0b111111;
+      res <<= 6;
+      res |= buf_[3] & 0b111111;
+      return res;
+    }
+    __IMPLEMENTATION_BUG();
+  }
+  void out(output_iterator<char> auto &it) {
+    for (uint8_t i = 0; i < cur_; ++i) {
+      *it++ = buf_[i];
+    }
+  }
+  void reset() {
+    *static_cast<int32_t *>(static_cast<void *>(buf_)) = 0;
+    cur_ = 0;
+  }
+  size_t width() const {
+    auto cd = code();
+    if (cd >= 0x1100 && cd <= 0x115f) {
+      return 2;
+    }
+    if (cd >= 0x2329 && cd <= 0x232a) {
+      return 2;
+    }
+    if (cd >= 0x2e80 && cd <= 0x303e) {
+      return 2;
+    }
+    if (cd >= 0x3040 && cd <= 0xa4cf) {
+      return 2;
+    }
+    if (cd >= 0xac00 && cd <= 0xd7a3) {
+      return 2;
+    }
+    if (cd >= 0xf900 && cd <= 0xfaff) {
+      return 2;
+    }
+    if (cd >= 0xfe30 && cd <= 0xfe6f) {
+      return 2;
+    }
+    if (cd >= 0xff00 && cd <= 0xff60) {
+      return 2;
+    }
+    if (cd >= 0xffe0 && cd <= 0xffe6) {
+      return 2;
+    }
+    if (cd >= 0x1f900 && cd <= 0x1f9ff) {
+      return 2;
+    }
+    if (cd >= 0x20000 && cd <= 0x2fffd) {
+      return 2;
+    }
+    if (cd >= 0x3000 && cd <= 0x3fffd) {
+      return 2;
+    }
+    return 1;
+  }
+  size_t size() const { return cur_; }
+  decltype(auto) operator+=(char c) {
+    if (cur_ == 4) {
+      cur_ = 0;
+    }
+    buf_[cur_++] = c;
+    return *this;
+  }
+};
+template <> class __unicode_buf<wchar_t> {
+private:
+  wchar_t c_;
+
+public:
+  operator bool() { return true; }
+  void out(output_iterator<wchar_t> auto &it) const { *it++ = c_; }
+  void reset() {}
+  size_t width() const { return 1; }
+  size_t size() const { return 1; }
+  decltype(auto) operator+=(wchar_t c) {
+    c_ = c;
+    return *this;
+  }
+};
+template <class CharT> class __unicode_counter {
+public:
+  static size_t width(const basic_string_view<CharT> &s) {
+    __unicode_buf<CharT> buf_;
+    size_t res{};
+    for (auto &&c : s) {
+      if (buf_ += c) {
+        res += buf_.width();
+        buf_.reset();
+      }
+    }
+    return res;
+  }
+};
+
+/**
  * The formatter iterator is an output iterator that provides a wrapper of the
  * underlying iterator (say the back insert iterator). It behaves as if the
  * underlying iterator is being used directly, except that it allows objects of
@@ -578,29 +708,40 @@ namespace __format_details {
  * @tparam Container The container, namely the basic string to produce
  * formatting output.
  */
-template <class Container, class CharT /*= typename Container::value_type*/>
-class __formatter_iterator {
+template <class CharT> class __formatter_iterator {
   friend __format_details::__public_func;
 
-protected:
-  using __container_type = Container;
-
 private:
-  Container *container_;
+  forward_list<basic_string<CharT>> list_;
+  typename forward_list<basic_string<CharT>>::iterator it_;
+  back_insert_iterator<basic_string<CharT>> inserter_;
 
 protected:
-  explicit __formatter_iterator() : container_() {}
-  explicit __formatter_iterator(Container &c) : container_(&c) {}
+  __formatter_iterator() {
+    list_.emplace_after(list_.before_begin());
+    it_ = list_.begin();
+    inserter_ = back_inserter(*it_);
+  }
 
 public:
-  __formatter_iterator &operator=(const CharT &c) {
-    if (container_) {
-      container_->push_back(c);
+  basic_string<CharT> result() {
+    auto it = list_.begin();
+    auto &res = *it;
+    while (++it != list_.end()) {
+      res += std::move(*it);
     }
+    return std::move(res);
+  }
+  __formatter_iterator &operator=(CharT c) {
+    *inserter_++ = c;
     return *this;
   }
   __formatter_iterator &operator=(const __formatter_iterator &other) {
-    container_ = other.container_;
+    return *this;
+  }
+  __formatter_iterator &operator=(basic_string<CharT> &&s) {
+    it_ = list_.insert_after(it_, std::move(s));
+    inserter_ = back_inserter(*it_);
     return *this;
   }
   // Those are all no-op operations for output iterators, only used to remain
@@ -619,13 +760,17 @@ template <class CharT> class __counter_formatter_iterator {
 
 private:
   size_t count_; ///< The counter.
+  __unicode_buf<CharT> unicode_buf_;
 
 public:
   __counter_formatter_iterator() : count_(0) {}
   size_t count() const { return count_; }
 
-  __counter_formatter_iterator &operator=(const CharT &c) {
-    ++count_;
+  __counter_formatter_iterator &operator=(CharT c) {
+    if (unicode_buf_ += c) {
+      count_ += unicode_buf_.width();
+      unicode_buf_.reset();
+    }
     return *this;
   }
   __counter_formatter_iterator &operator*() { return *this; }
@@ -643,6 +788,7 @@ class __limited_formatter_iterator {
 private:
   size_t avail_; ///< Available operations left.
   WrappedOutputIterator it_;
+  __unicode_buf<CharT> unicode_buf_;
 
 public:
   __limited_formatter_iterator(WrappedOutputIterator &c, size_t maxOp)
@@ -650,10 +796,18 @@ public:
   size_t avail() const { return avail_; }
   WrappedOutputIterator out() const { return it_; }
 
-  __limited_formatter_iterator &operator=(const CharT &c) {
+  __limited_formatter_iterator &operator=(CharT c) {
     if (avail_ > 0) {
-      --avail_;
-      *it_++ = c;
+      if (unicode_buf_ += c) {
+        auto width = unicode_buf_.width();
+        if (avail_ >= width) {
+          avail_ -= width;
+          unicode_buf_.out(it_);
+          unicode_buf_.reset();
+        } else {
+          avail_ = 0;
+        }
+      }
     }
     return *this;
   }
@@ -846,6 +1000,81 @@ private:
     __THROW_FORMAT_ERROR(why);
   }
 
+  [[noreturn]] static inline void __throw_invalid_format_type() {
+    __THROW_FORMAT_ERROR("invalid format type");
+  }
+
+  auto __fill_and_output_wrap(int widthBeforeFill, auto &&func, auto &fc) {
+    auto &width = widthBeforeFill;
+    size_t fillL = 0, fillR = 0;
+
+    if (width_ != width_none && width < width_) {
+      auto distance = width_ - width;
+      switch (align_) {
+      case align::left:
+        fillR = distance;
+        break;
+      case align::right:
+      case align::none:
+        fillL = distance;
+        break;
+      case align::center:
+        fillL = distance / 2;
+        fillR = distance - fillL;
+        break;
+      }
+    }
+
+    auto out = fc.out();
+    // left fill
+    for (size_t i = 0; i < fillL; ++i) {
+      *out++ = fill_char_;
+    }
+    // core part
+    out = func();
+    // right fill
+    for (size_t i = 0; i < fillR; ++i) {
+      *out++ = fill_char_;
+    }
+
+    return out;
+  }
+
+  auto __fill_and_output(basic_stringstream<CharT> &ss, auto &fc) {
+    auto str = ss.str();
+    return __fill_and_output_wrap(
+        __unicode_counter<CharT>::width(str),
+        [&str, &fc] {
+          auto out = fc.out();
+          if constexpr (requires {
+                          { *out++ = std::move(str) }
+                          ->same_as<decltype(out)>;
+                        }) {
+            // make use of the string for raw formatter iterator
+            *out++ = std::move(str);
+          } else {
+            for (auto &&c : str) {
+              *out++ = c;
+            }
+          }
+          return out;
+        },
+        fc);
+  }
+
+  auto __fill_and_output(const basic_string_view<CharT> &sv, auto &fc) {
+    return __fill_and_output_wrap(
+        __unicode_counter<CharT>::width(sv),
+        [&sv, &fc] {
+          auto out = fc.out();
+          for (auto &&c : sv) {
+            *out++ = c;
+          }
+          return out;
+        },
+        fc);
+  }
+
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   __format_as_integral_b(__format_details::__integral auto t,
@@ -895,7 +1124,7 @@ private:
       align_ = align::right;
     }
     type_ = 's';
-    return __format(basic_string_view(buf, bufit), fc);
+    return __fill_and_output(basic_string_view(buf, bufit), fc);
   }
 
   template <class OutputIt>
@@ -911,76 +1140,6 @@ private:
     auto out = fc.out();
     *out++ = c;
     return out;
-  }
-
-  auto __fill_and_output_wrap(int widthBeforeFill, auto &&func, auto &fc) {
-    auto &width = widthBeforeFill;
-    size_t fillL = 0, fillR = 0;
-
-    if (width_ != width_none && width < width_) {
-      auto distance = width_ - width;
-      switch (align_) {
-      case align::left:
-        fillR = distance;
-        break;
-      case align::right:
-      case align::none:
-        fillL = distance;
-        break;
-      case align::center:
-        fillL = distance / 2;
-        fillR = distance - fillL;
-        break;
-      }
-    }
-
-    auto out = fc.out();
-    // left fill
-    for (size_t i = 0; i < fillL; ++i) {
-      *out++ = fill_char_;
-    }
-    // core part
-    out = func();
-    // right fill
-    for (size_t i = 0; i < fillR; ++i) {
-      *out++ = fill_char_;
-    }
-
-    return out;
-  }
-
-  auto __fill_and_output(basic_stringstream<CharT> &ss, auto &fc) {
-    return __fill_and_output_wrap(
-        ss.tellp(),
-        [&ss, &fc] {
-          auto out = fc.out();
-          enum { buflen = 256 };
-          CharT buf[buflen];
-          while (true) {
-            auto read = ss.readsome(buf, size(buf));
-            for (auto it = buf, ite = buf + read; it != ite;) {
-              *out++ = *it++;
-            }
-            if (read < buflen) {
-              break;
-            }
-          }
-          return out;
-        },
-        fc);
-  }
-
-  auto __fill_and_output(const basic_string_view<CharT> &sv, auto &fc) {
-    return __fill_and_output_wrap(
-        sv.size(),
-        [&sv, &fc] {
-          auto out = fc.out();
-          for (auto &&c : sv) {
-            *out++ = c;
-          }
-          return out;
-        },
-        fc);
   }
 
   template <class OutputIt>
@@ -1072,7 +1231,7 @@ private:
       return __fill_and_output(t.substr(0, precision_), fc);
     } else {
       return __fill_and_output(t, fc);
-    }
+    };
   }
 
   // plain integral specific
@@ -1204,10 +1363,6 @@ private:
   typename basic_format_context<OutputIt, CharT>::iterator
   __format(const CharT *cstr, basic_format_context<OutputIt, CharT> &fc) {
     return __format(basic_string_view<CharT>(cstr), fc);
-  }
-
-  [[noreturn]] static inline void __throw_invalid_format_type() {
-    __THROW_FORMAT_ERROR("invalid format type");
   }
 
   template <class T> void __format_check_type_align(const T &) {
@@ -1564,7 +1719,7 @@ private:
       } else /*if (c == '}')*/ {
         // now, only "}}" is accepted
         ++it;
-        __throw_invalid_format_if(it == fmt.end() || *it != '}');
+        __throw_invalid_format_if(it == pc.end() || *it != '}');
         // copy the '}' directly
         *out++ = *it++;
         continue;
@@ -1576,18 +1731,16 @@ private:
 
   inline static string vformat(const locale &loc, const string_view &fmt,
                                const format_args &args) {
-    string res;
-    __formatter_iterator it(res);
+    __formatter_iterator<char> it;
     vformat_to(it, loc, fmt, args);
-    return res;
+    return it.result();
   }
 
   inline static wstring vformat(const locale &loc, const wstring_view &fmt,
                                 const wformat_args &args) {
-    wstring res;
-    __formatter_iterator it(res);
+    __formatter_iterator<wchar_t> it;
     vformat_to(it, loc, fmt, args);
-    return res;
+    return it.result();
   }
 
   template <class OutputIt, class CharT, class... Args>
