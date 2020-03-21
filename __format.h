@@ -1040,8 +1040,7 @@ private:
     return out;
   }
 
-  auto __fill_and_output(basic_stringstream<CharT> &ss, auto &fc) {
-    auto str = ss.str();
+  auto __fill_and_output(basic_string<CharT> &&str, auto &fc) {
     return __fill_and_output_wrap(
         __unicode_counter<CharT>::width(str),
         [&str, &fc] {
@@ -1203,7 +1202,7 @@ private:
     }
     ss << ut;
 
-    return __fill_and_output(ss, fc);
+    return __fill_and_output(ss.str(), fc);
   }
 
   // integral specific
@@ -1340,7 +1339,7 @@ private:
 
   L_output:
     ss << setprecision(precision_) << t;
-    return __fill_and_output(ss, fc);
+    return __fill_and_output(ss.str(), fc);
   }
 
   // pointer specific
