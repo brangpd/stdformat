@@ -725,23 +725,28 @@ public:
 template <class CharT> class __unicode_buf;
 template <class CharT> class __unicode_buf {
 private:
-  enum { buflen = 4 };
+  enum { buflen = 4, width_dirty = -1 };
   CharT buf_[buflen];
   uint8_t cur_{};
   locale loc_;
+  mutable size_t width_{}; // width cache
 
 public:
   explicit __unicode_buf(const locale &loc) : loc_(loc) {}
-  inline operator bool() const {
-    return 0 != __width_counter<CharT>::width(
-                    basic_string_view<CharT>(buf_, cur_), loc_);
-  }
+  inline operator bool() const { return width(); }
   inline void out(output_iterator<CharT> auto &it) {
-    copy(buf_, buf_ + cur_, it);
+    if (*this) {
+      copy(buf_, buf_ + cur_, it);
+    }
   }
-  inline void reset() { cur_ = 0; }
+  inline void reset() {
+    cur_ = 0;
+    width_ = 0;
+  }
   inline size_t width() const {
-    return __width_counter<CharT>::width({buf_, cur_}, loc_);
+    return width_ == width_dirty
+               ? width_ = __width_counter<CharT>::width({buf_, cur_}, loc_)
+               : width_;
   }
   inline size_t size() const { return cur_; }
   inline decltype(auto) operator+=(CharT c) {
@@ -817,16 +822,16 @@ public:
   }
   // Those are all no-op operations for output iterators, only used to remain
   // consistency.
-  constexpr inline __formatter_iterator &operator*() { return *this; }
-  constexpr inline __formatter_iterator &operator++() { return *this; }
-  constexpr inline __formatter_iterator &operator++(int) { return *this; }
+  constexpr inline decltype(auto) operator*() { return *this; }
+  constexpr inline decltype(auto) operator++() { return *this; }
+  constexpr inline decltype(auto) operator++(int) { return *this; }
 };
 
 /**
  * Counter wrapper for formatted_size's. It does not write any character but
- * only counts how many times it is operated.
+ * only counts the width of output characters.
  */
-template <class CharT> class __counter_formatter_iterator {
+template <class CharT> class __width_counter_formatter_iterator {
   friend __format_details::__public_func;
 
 private:
@@ -834,22 +839,45 @@ private:
   __unicode_buf<CharT> unicode_buf_;
 
 public:
-  __counter_formatter_iterator(const locale &loc)
+  __width_counter_formatter_iterator(const locale &loc)
       : count_(0), unicode_buf_(loc) {}
   size_t count() const { return count_; }
 
-  __counter_formatter_iterator &operator=(CharT c) {
+  __width_counter_formatter_iterator &operator=(CharT c) {
     if (unicode_buf_ += c) {
       count_ += unicode_buf_.width();
       unicode_buf_.reset();
     }
     return *this;
   }
-  constexpr inline __counter_formatter_iterator &operator*() { return *this; }
-  constexpr inline __counter_formatter_iterator &operator++() { return *this; }
-  constexpr inline __counter_formatter_iterator &operator++(int) {
+  inline void out(output_iterator<CharT> auto &oit) { unicode_buf_.out(oit); }
+  constexpr inline decltype(auto) operator*() { return *this; }
+  constexpr inline decltype(auto) operator++() { return *this; }
+  constexpr inline decltype(auto) operator++(int) { return *this; }
+};
+
+/**
+ * Counter wrapper for formatted_size's. It does not write any character but
+ * only counts the length of output characters.
+ */
+template <class CharT> class __counter_formatter_iterator {
+  friend __format_details::__public_func;
+
+private:
+  size_t count_{};
+  CharT c_;
+
+public:
+  size_t count() const { return count_; }
+  inline decltype(auto) operator=(CharT c) {
+    ++count_;
+    c_ = c;
     return *this;
   }
+  inline void out(output_iterator<CharT> auto &oit) { *oit++ = c_; }
+  constexpr inline decltype(auto) operator*() { return *this; }
+  constexpr inline decltype(auto) operator++() { return *this; }
+  constexpr inline decltype(auto) operator++(int) { return *this; }
 };
 
 /**
@@ -861,15 +889,14 @@ class __limited_formatter_iterator {
 
 private:
   size_t avail_; ///< Available operations left.
-  WrappedOutputIterator it_;
+  WrappedOutputIterator *oit_;
   __unicode_buf<CharT> unicode_buf_;
 
 public:
-  __limited_formatter_iterator(WrappedOutputIterator &c, size_t maxOp,
+  __limited_formatter_iterator(WrappedOutputIterator &woit, size_t maxOp,
                                const locale &loc)
-      : it_(c), avail_(maxOp), unicode_buf_(loc) {}
-  size_t avail() const { return avail_; }
-  WrappedOutputIterator out() const { return it_; }
+      : oit_(&woit), avail_(maxOp), unicode_buf_(loc) {}
+  inline WrappedOutputIterator out() const { return *oit_; }
 
   __limited_formatter_iterator &operator=(CharT c) {
     if (avail_ > 0) {
@@ -877,7 +904,7 @@ public:
         auto width = unicode_buf_.width();
         if (avail_ >= width) {
           avail_ -= width;
-          unicode_buf_.out(it_);
+          unicode_buf_.out(*oit_);
           unicode_buf_.reset();
         } else {
           avail_ = 0;
@@ -886,10 +913,25 @@ public:
     }
     return *this;
   }
-  constexpr inline __limited_formatter_iterator &operator*() { return *this; }
-  constexpr inline __limited_formatter_iterator &operator++() { return *this; }
-  constexpr inline __limited_formatter_iterator &operator++(int) {
-    return *this;
+  constexpr inline decltype(auto) operator*() { return *this; }
+  constexpr inline decltype(auto) operator++() { return *this; }
+  constexpr inline decltype(auto) operator++(int) { return *this; }
+};
+
+/**
+ * Unfortunately, the GNU C++ library does not provide specalizations for
+ * has/use_facet<num_put<CharT, OutputIt>>, so have to use the num_put
+ * directly.
+ */
+template <class CharT, class OutputIt>
+struct __formatter_num_put : num_put<CharT, OutputIt> {};
+struct __formatter_ios_base : ios_base {
+  __formatter_ios_base() = default;
+  __formatter_ios_base(const __formatter_ios_base &other) {
+    flags(other.flags());
+    width(other.width());
+    precision(other.precision());
+    imbue(other.getloc());
   }
 };
 
@@ -908,6 +950,26 @@ private:
     minus, ///< '-'
     space, ///< ' '
   };
+  enum class type : uint8_t {
+    none,
+    a,
+    A,
+    b,
+    B,
+    c,
+    d,
+    e,
+    E,
+    f,
+    F,
+    g,
+    G,
+    o,
+    p,
+    s,
+    x,
+    X,
+  };
   align align_ : 2;
   sign sign_ : 2;
   bool sharp_ : 1;           ///< '#'
@@ -915,19 +977,18 @@ private:
   bool locale_specific_ : 1; ///< 'L'
   bool width_nested_ : 1;
   bool precision_nested_ : 1;
+  bool type_upper_ : 1;
+  type type_ : 5;
   CharT fill_char_;
-  enum : int { width_none = -1, precision_none = -1, type_none = 0 };
-  CharT type_;
-  union {
-    int width_;
-    int width_idx_;
-  }; ///< if using nested width, the index is stored in
-     ///< width_idx_ and should be replaced by the number of
-     ///< that index later. same idea for precision.
-  union {
-    int precision_;
-    int precision_idx_;
-  };
+  enum : int { width_none = -1, precision_none = -1 };
+
+  ///< if using nested width, the index is stored in
+  ///< width_idx_ and should be replaced by the number of
+  ///< that index later. same idea for precision.
+  int width_;
+  int &width_idx_ = width_;
+  int precision_;
+  int &precision_idx_ = precision_;
 
   void __parse_fill_and_align(auto &it) {
     auto opt = *(it + 1);
@@ -1041,31 +1102,39 @@ private:
   }
 
   void __parse_type(auto &it) {
-    switch (auto c = *it) {
+    auto c = *it;
+    switch (c) {
+
+#define __caseof(x)                                                            \
+  case *#x:                                                                    \
+    type_ = type::x;                                                           \
+    ++it;                                                                      \
+    break;
+      __caseof(a);
+      __caseof(A);
+      __caseof(b);
+      __caseof(B);
+      __caseof(c);
+      __caseof(d);
+      __caseof(e);
+      __caseof(E);
+      __caseof(f);
+      __caseof(F);
+      __caseof(g);
+      __caseof(G);
+      __caseof(o);
+      __caseof(p);
+      __caseof(x);
+      __caseof(X);
+#undef __caseof
+
     default:
-      type_ = type_none;
-      break;
-    case 'a':
-    case 'A':
-    case 'b':
-    case 'B':
-    case 'c':
-    case 'd':
-    case 'e':
-    case 'E':
-    case 'f':
-    case 'F':
-    case 'g':
-    case 'G':
-    case 'o':
-    case 'p':
-    case 's':
-    case 'x':
-    case 'X':
-      type_ = c;
-      ++it;
-      break;
+      type_ = type::none;
+      type_upper_ = false;
+      return;
     }
+
+    type_upper_ = isupper(c);
   }
 
   [[noreturn]] static inline void __throw_char_out_of_range() {
@@ -1165,7 +1234,7 @@ private:
     size_t width;
     if (sharp_) {
       *bufit++ = '0';
-      *bufit++ = type_;
+      *bufit++ = type_upper_ ? 'B' : 'b';
     }
     if (align_ != align::none) {
       zero_ = false;
@@ -1219,57 +1288,179 @@ private:
     // because the standard io treat the oct / hex form of negative integers
     // as the real binary form which does not meet the formatting library's
     // requirement.
+    unsigned_t ut = t < 0 ? static_cast<unsigned_t>(-t) : t;
 
-    basic_stringstream<CharT> ss{}; // achieve the raw number without fills
+    // the ios base to set ios flags for num_put.
+    __formatter_ios_base iosb;
     if (locale_specific_) {
-      ss.imbue(fc.locale());
+      iosb.imbue(fc.locale());
     }
 
     if (sharp_) {
-      ss << showbase;
+      iosb.setf(ios::showbase);
     }
     switch (type_) {
-    case 'd':
-    case type_none:
-      ss << dec;
+    default:
       break;
-    case 'o':
-      ss << oct;
+    case type::d:
+    case type::none:
+      iosb.setf(ios::dec);
       break;
-    case 'X':
-      ss << uppercase;
+    case type::o:
+      iosb.setf(ios::oct);
+      break;
+    case type::X:
+      iosb.setf(ios::uppercase);
       [[fallthrough]];
-    case 'x':
-      ss << hex;
+    case type::x:
+      iosb.setf(ios::hex);
       break;
     }
+    CharT sign{};
     if (t < 0) {
-      ss << '-';
+      sign = '-';
+    } else {
+      if (sign_ == sign::space) {
+        sign = ' ';
+      } else if (sign_ == sign::plus) {
+        sign = '+';
+      }
+    }
+
+    CharT fillOrZero = fill_char_;
+    if (zero_) {
+      iosb.setf(ios::internal, ios::adjustfield);
+      fillOrZero = '0';
+      if (width_ != width_none) {
+        if (sign && width_ > 1) {
+          --width_;
+        }
+        iosb.width(width_);
+      }
+    }
+
+    using counter_t = __counter_formatter_iterator<CharT>;
+    counter_t cit;
+    __formatter_ios_base iostmp(iosb); // width may be erased by a put operation
+    cit = __formatter_num_put<CharT, counter_t>().put(
+        cit, iostmp, fillOrZero, static_cast<uintmax_t>(ut));
+    basic_string<CharT> str{};
+    CharT *begin;
+
+    if (sign) {
+      str.resize(cit.count() + 1);
+      *str.data() = sign;
+      begin = str.data() + 1;
+    } else {
+      str.resize(cit.count());
+      begin = str.data();
+    }
+    __formatter_num_put<CharT, CharT *>().put(begin, iosb, fillOrZero,
+                                              static_cast<uintmax_t>(ut));
+    return __fill_and_output(std::move(str), fc);
+  }
+
+  // floating point specific
+  template <class OutputIt>
+  typename basic_format_context<OutputIt, CharT>::iterator
+  __format(__format_details::__floating_point auto t,
+           basic_format_context<OutputIt, CharT> &fc) {
+    __formatter_ios_base iosb;
+    if (locale_specific_) {
+      iosb.imbue(fc.locale());
+    }
+    CharT sign{};
+    // make t always positive to provide consistency with inf and nan, since
+    // they do not produce positive sign with the standard io library
+    if (signbit(t)) {
+      sign = '-';
+      t = -t;
     } else {
       if (sign_ == sign::plus) {
-        ss << '+';
+        sign = '+';
       } else if (sign_ == sign::space) {
-        ss << ' ';
+        sign = ' ';
       }
     }
-    unsigned_t ut = t < 0 ? static_cast<unsigned_t>(-t) : t;
+
+    CharT fillOrZero = fill_char_;
     if (zero_) {
-      ss << internal << setfill(static_cast<CharT>('0'));
+      // padding leading zeros, since we deal with sign before, just pad before
+      // and set adjustfield to right.
+      iosb.setf(ios::right, ios::adjustfield);
+      fillOrZero = '0';
       if (width_ != width_none) {
-        if (t < 0) {
-          if (width_ > 1) {
-            ss << setw(width_ - 1);
-          }
+        if (sign && width_ > 1) {
+          --width_;
+        }
+        iosb.width(width_);
+      }
+    }
+
+    switch (type_) {
+    default:
+      break;
+    case type::none:
+      if (precision_ != precision_none) {
+        // fresh ios base does nothing for default float
+      } else {
+        // According to the standard, default behavior with no precision for
+        // floating points is the same as calling to_chars(first, last, value),
+        // which behaves as choosing the minimal length for printf()'s format
+        // between specifiers %f and %e (prefer %f for a tie). For %f, there are
+        // always 6 digits after the radix point; For %e, there are usually 12
+        // digits in total for those who has its exponent less than 100 and 13
+        // digits otherwise. Therefore, a value with less than 5 digits before
+        // the radix point would be treated as fixed, and the others scientific.
+        if (static_cast<decltype(t)>(1e5 - 1e-7) > t) {
+          iosb.setf(ios::fixed, ios::floatfield);
         } else {
-          if (width_) {
-            ss << setw(width_);
-          }
+          iosb.setf(ios::scientific, ios::floatfield);
         }
       }
+      break;
+    case type::a:
+    case type::A:
+      // hex float is fixed or scientific
+      iosb.setf(ios::fixed | ios::scientific, ios::floatfield);
+      break;
+    case type::e:
+    case type::E:
+      iosb.setf(ios::scientific, ios::floatfield);
+      break;
+    case type::f:
+    case type::F:
+      iosb.setf(ios::fixed, ios::floatfield);
+      break;
     }
-    ss << ut;
+    if (type_upper_) {
+      iosb.setf(ios::uppercase);
+    }
+    if (precision_ == precision_none) {
+      // default precision is always 6. ignored by 'a' & 'A'.
+      precision_ = 6;
+    }
+    iosb.precision(precision_);
 
-    return __fill_and_output(ss.str(), fc);
+    using counter_t = __counter_formatter_iterator<CharT>;
+    counter_t cit;
+    __formatter_ios_base iostmp(iosb);
+    cit =
+        __formatter_num_put<CharT, counter_t>().put(cit, iostmp, fillOrZero, t);
+
+    basic_string<CharT> str{};
+    CharT *begin;
+
+    if (sign) {
+      str.resize(1 + cit.count());
+      *str.data() = sign;
+      begin = str.data() + 1;
+    } else {
+      str.resize(cit.count());
+      begin = str.data();
+    }
+    __formatter_num_put<CharT, CharT *>().put(begin, iosb, fillOrZero, t);
+    return __fill_and_output(std::move(str), fc);
   }
 
   // integral specific
@@ -1278,10 +1469,10 @@ private:
   __format_as_integral(__format_details::__integral auto t,
                        basic_format_context<OutputIt, CharT> &fc) {
     switch (type_) {
-    case 'b':
-    case 'B':
+    case type::b:
+    case type::B:
       return __format_as_integral_b(t, fc);
-    case 'c':
+    case type::c:
       return __format_as_integral_c(t, fc);
     default:
       return __format_as_integral_odx(t, fc);
@@ -1294,6 +1485,7 @@ private:
   __format(const basic_string_view<CharT> &t,
            basic_format_context<OutputIt, CharT> &fc) {
     if (precision_ != precision_none) {
+      // TODO: calculate width
       return __fill_and_output(t.substr(0, precision_), fc);
     } else {
       return __fill_and_output(t, fc);
@@ -1312,9 +1504,9 @@ private:
   template <class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
   __format(bool t, basic_format_context<OutputIt, CharT> &fc) {
-    if (type_ == 's' || type_ == type_none) {
+    if (type_ == type::s || type_ == type::none) {
       // print bool as string
-      type_ = 's';
+      type_ = type::s;
       locale loc = locale_specific_ ? fc.locale() : locale::classic();
       if (t) {
         return __fill_and_output(use_facet<numpunct<CharT>>(loc).truename(),
@@ -1333,7 +1525,7 @@ private:
   typename basic_format_context<OutputIt, CharT>::iterator
   __format(__format_details::__char_t auto t,
            basic_format_context<OutputIt, CharT> &fc) {
-    if (type_ == type_none || type_ == 'c') {
+    if (type_ == type::none || type_ == type::c) {
       auto out = fc.out();
       *out++ = t;
       return out;
@@ -1342,80 +1534,13 @@ private:
     }
   }
 
-  // floating point specific
-  template <class OutputIt>
-  typename basic_format_context<OutputIt, CharT>::iterator
-  __format(__format_details::__floating_point auto t,
-           basic_format_context<OutputIt, CharT> &fc) {
-    basic_stringstream<CharT> ss{};
-    if (locale_specific_) {
-      ss.imbue(fc.locale());
-    }
-    // make t always positive to provide consistency with inf and nan, since
-    // they do not produce positive sign with the standard io library
-    if (signbit(t)) {
-      ss << '-';
-      t = -t;
-    } else {
-      if (sign_ == sign::plus) {
-        ss << '+';
-      } else if (sign_ == sign::space) {
-        ss << ' ';
-      }
-    }
-    if (type_ == type_none) {
-      if (precision_ != precision_none) {
-        ss << defaultfloat;
-      } else {
-        // According to the standard, default behavior with no precision for
-        // floating points is the same as calling to_chars(first, last, value),
-        // which behaves as choosing the minimal length for printf()'s format
-        // between specifiers %f and %e (prefer %f for a tie). For %f, there are
-        // always 6 digits after the radix point; For %e, there are usually 12
-        // digits in total for those who has its exponent less than 100 and 13
-        // digits otherwise. Therefore, a value with less than 5 digits before
-        // the radix point would be treated as fixed, and the others scientific.
-        if (static_cast<decltype(t)>(1e5 - 1e-7) > t) {
-          ss << fixed;
-        } else {
-          ss << scientific;
-        }
-      }
-      goto L_output;
-    } else if (type_ == 'a' || type_ == 'A') {
-      ss << hexfloat;
-    } else if (type_ == 'e' || type_ == 'E') {
-      ss << scientific;
-      if (precision_ == precision_none) {
-        // for 'e' / 'f' / 'g', default precision is always 6.
-        precision_ = 6;
-      }
-    } else if (type_ == 'f' || type_ == 'F') {
-      ss << fixed;
-      if (precision_ == precision_none) {
-        precision_ = 6;
-      }
-    } else if (type_ == 'g' || type_ == 'G') {
-      if (precision_ == precision_none) {
-        precision_ = 6;
-      }
-    }
-    if (isupper(type_)) {
-      ss << uppercase;
-    }
-
-  L_output:
-    ss << setprecision(precision_) << t;
-    return __fill_and_output(ss.str(), fc);
-  }
-
   // pointer specific
   template <class OutputIt, class PtrT>
       requires is_pointer_v<PtrT> ||
       is_null_pointer_v<PtrT> typename basic_format_context<OutputIt,
                                                             CharT>::iterator
       __format(PtrT t, basic_format_context<OutputIt, CharT> &fc) {
-    type_ = 'x';
+    type_ = type::x;
 #ifdef __intptr_t_defined
     return __format_as_integral(reinterpret_cast<uintptr_t>(t), fc);
 #else
@@ -1433,79 +1558,79 @@ private:
 
   template <class T> void __format_check_type_align(const T &) {
     if constexpr (__is_string_v<T>) {
-      if (type_ == type_none) {
-        type_ = 's';
+      if (type_ == type::none) {
+        type_ = type::s;
       }
-      if (type_ != 's') {
+      if (type_ != type::s) {
         __throw_invalid_format_type();
       }
     } else if constexpr (__is_plain_integral_v<T>) {
       switch (type_) {
-      case type_none:
-        type_ = 'd';
+      case type::none:
+        type_ = type::d;
         break;
-      case 'b':
-      case 'B':
-      case 'c':
-      case 'd':
-      case 'o':
-      case 'x':
-      case 'X':
+      case type::b:
+      case type::B:
+      case type::c:
+      case type::d:
+      case type::o:
+      case type::x:
+      case type::X:
         break;
       default:
         __throw_invalid_format_type();
       }
     } else if constexpr (__is_char_t_v<T>) {
       switch (type_) {
-      case type_none:
-        type_ = 'c';
+      case type::none:
+        type_ = type::c;
         break;
-      case 'b':
-      case 'B':
-      case 'd':
-      case 'o':
-      case 'x':
-      case 'X':
+      case type::b:
+      case type::B:
+      case type::d:
+      case type::o:
+      case type::x:
+      case type::X:
         break;
       default:
         __throw_invalid_format_type();
       }
     } else if constexpr (is_same_v<T, bool>) {
       switch (type_) {
-      case type_none:
-        type_ = 's';
+      case type::none:
+        type_ = type::s;
         break;
-      case 'b':
-      case 'B':
-      case 'c':
-      case 'd':
-      case 'o':
-      case 'x':
-      case 'X':
+      case type::b:
+      case type::B:
+      case type::c:
+      case type::d:
+      case type::o:
+      case type::x:
+      case type::X:
         break;
       default:
         __throw_invalid_format_type();
       }
     } else if constexpr (is_floating_point_v<T>) {
       switch (type_) {
-      case type_none:
-      case 'a':
-      case 'A':
-      case 'e':
-      case 'E':
-      case 'f':
-      case 'F':
-      case 'g':
-      case 'G':
+      case type::none:
+      case type::a:
+      case type::A:
+      case type::e:
+      case type::E:
+      case type::f:
+      case type::F:
+      case type::g:
+      case type::G:
         break;
       default:
         __throw_invalid_format_type();
       }
     } else if constexpr (__is_pointer_v<T>) {
-      if (type_ == type_none) {
-        type_ = 'p';
+      if (type_ == type::none) {
+        type_ = type::p;
       }
-      if (type_ != 'p') {
+      if (type_ != type::p) {
         __throw_invalid_format_type();
       }
     }
@@ -1861,7 +1986,7 @@ private:
   static size_t formatted_size(const locale &loc,
                                const basic_string_view<CharT> &fmt,
                                const Args &... args) {
-    using iterator_t = __counter_formatter_iterator<CharT>;
+    using iterator_t = __width_counter_formatter_iterator<CharT>;
     using context_t = basic_format_context<iterator_t, CharT>;
     iterator_t it(loc);
     it = vformat_to(it, loc, fmt,
