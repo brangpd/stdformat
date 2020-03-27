@@ -1220,8 +1220,11 @@ private:
     using unsigned_t = make_unsigned_t<decltype(t)>;
     unsigned_t ut = t >= 0 ? t : static_cast<unsigned_t>(-t);
     // prepare to redirect to string format
-    CharT buf[numeric_limits<unsigned_t>::digits + 1 /*sign*/ + 2 /*0B*/];
-    auto bufit = buf;
+    basic_string<CharT> str{};
+    str.reserve(numeric_limits<unsigned_t>::digits + 1 /*sign*/ + 2 /*0B*/);
+    auto bufit = back_inserter(str);
+    //    CharT buf[numeric_limits<unsigned_t>::digits + 1 /*sign*/ + 2 /*0B*/];
+    //    auto bufit = buf;
     if (t < 0) {
       *bufit++ = '-';
     } else {
@@ -1259,7 +1262,8 @@ private:
     if (align_ == align::none) {
       align_ = align::right;
     }
-    return __fill_and_output(basic_string_view(buf, bufit), fc);
+    str.shrink_to_fit();
+    return __fill_and_output(std::move(str), fc);
   }
 
   template <class OutputIt>
