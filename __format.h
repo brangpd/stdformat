@@ -897,6 +897,7 @@ public:
                                const locale &loc)
       : oit_(&woit), avail_(maxOp), unicode_buf_(loc) {}
   inline WrappedOutputIterator out() const { return *oit_; }
+  inline size_t avail() const { return avail_; }
 
   __limited_formatter_iterator &operator=(CharT c) {
     if (avail_ > 0) {
