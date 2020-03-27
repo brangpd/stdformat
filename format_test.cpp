@@ -16,6 +16,8 @@ struct IntegerFormatTest : FormatTest {};
 
 struct FloatingPointFormatTest : FormatTest {};
 
+struct UserDefinedFormatTest : FormatTest {};
+
 TEST_F(BasicFormatTest, BasicFormatTest_SimpleFormat_Test) {
   EXPECT_EQ(format("{}", 42), "42");
 }
@@ -260,4 +262,8 @@ TEST_F(FloatingPointFormatTest, FloatingPointFormatTest_SpecialValues_Test) {
   test_special((float){});
   test_special((double){});
   test_special((long double){});
+}
+
+TEST_F(UserDefinedFormatTest, UserDefinedFormatTest) {
+
 }

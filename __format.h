@@ -115,6 +115,7 @@ class format_error;
 #include <array>
 #include <bit>
 #include <cmath>
+#include <codecvt>
 #include <forward_list>
 #include <iomanip>
 #include <iterator>
@@ -568,60 +569,9 @@ public:
 };
 
 namespace __format_details {
-/**
- * The buf to store utf8 characters for width calculation.
- * Note: wchar_t is not implemented. In fact wchar_t does not work correctly in
- * my machine... Also wchar_t seems not widely used so I plan not to implement
- * it. To implement the wchar_t a locale codecvt is needed but this guy is not
- * working as well. To summarize, never use wchar_t / wstring.
- */
-template <class CharT> class __unicode_buf;
-template <> class __unicode_buf<char> {
-private:
-  char buf_[4]{};
-  uint8_t cur_{};
-
-public:
-  operator bool() const { return code(); }
-  uint32_t code() const {
-    uint32_t res;
-    switch (cur_) {
-    case 0:
-      return 0;
-    case 1:
-      return (buf_[0] & 0b1111111);
-    case 2:
-      return ((buf_[0] & 0b11111) << 6) | (buf_[1] & 0b111111);
-    case 3:
-      res = buf_[0] & 0b1111;
-      res <<= 6;
-      res |= buf_[1] & 0b111111;
-      res <<= 6;
-      res |= buf_[2] & 0b111111;
-      return res;
-    case 4:
-      res = buf_[0] & 0b1111;
-      res <<= 6;
-      res |= buf_[1] & 0b111111;
-      res <<= 6;
-      res |= buf_[2] & 0b111111;
-      res <<= 6;
-      res |= buf_[3] & 0b111111;
-      return res;
-    }
-    __IMPLEMENTATION_BUG();
-  }
-  void out(output_iterator<char> auto &it) {
-    for (uint8_t i = 0; i < cur_; ++i) {
-      *it++ = buf_[i];
-    }
-  }
-  void reset() {
-    *static_cast<int32_t *>(static_cast<void *>(buf_)) = 0;
-    cur_ = 0;
-  }
-  size_t width() const {
-    auto cd = code();
+class __basic_width_counter {
+protected:
+  static size_t width(char32_t cd) {
     if (cd >= 0x1100 && cd <= 0x115f) {
       return 2;
     }
@@ -660,45 +610,183 @@ public:
     }
     return 1;
   }
-  size_t size() const { return cur_; }
-  decltype(auto) operator+=(char c) {
-    if (cur_ == 4) {
-      cur_ = 0;
+};
+template <class CharT> class __width_counter;
+/**
+ * Width counter for char.
+ */
+template <> class __width_counter<char> : __basic_width_counter {
+public:
+  static size_t width(const basic_string_view<char> &sv, const locale &loc) {
+    enum { buflen = 16 };
+    char32_t c32[buflen];
+    size_t count = 0;
+    mbstate_t mbstate{};
+    // Note: The cuchar library function mbrtoc32 takes the global c locale for
+    // conversion which is not thread safe, thus have to use C++ codecvt.
+
+    // FIXME: deprecated, use char8_t instead of char.
+    using cvt = codecvt<char32_t, char, mbstate_t>;
+    auto &&f = use_facet<cvt>(loc);
+
+    const char *svp = sv.data();
+    const char *svpe = svp + sv.size(); // end of svp
+
+    const char *fromNext{};
+    char32_t *toNext{};
+
+    while (svp < svpe) {
+      auto inRes =
+          f.in(mbstate, svp, svpe, fromNext, c32, c32 + buflen, toNext);
+      if (svp == fromNext) {
+        break;
+      }
+      svp = fromNext;
+      switch (inRes) {
+      case codecvt_base::ok:
+      case codecvt_base::partial:
+        for (auto it = c32; it != toNext; ++it) {
+          count += __basic_width_counter::width(*it);
+        }
+        break;
+      case codecvt_base::error:
+      case codecvt_base::noconv:
+        goto L_break_while;
+      }
+      if (inRes == codecvt_base::ok) {
+        break;
+      }
+    }
+  L_break_while:
+    return count;
+  }
+  static inline size_t width(char, const locale &) { return 1; }
+};
+/**
+ * Width counter for wchar_t.
+ */
+template <> class __width_counter<wchar_t> : __basic_width_counter {
+public:
+  static size_t width(const basic_string_view<wchar_t> &sv, const locale &loc) {
+    // Since standard library does not provide code converter from wchar_t to
+    // char32_t, first convert a wchar_t character to char then convert the char
+    // character to char32_t
+
+    // FIXME: deprecated, use char8_t instead of char
+    using cvtW2C = codecvt<wchar_t, char, mbstate_t>;
+    auto &&fW2C = use_facet<cvtW2C>(loc); // wchat_t to char
+    mbstate_t mbstateW2C{};               // wchar_t to char & char to char32_t
+
+    char32_t c32{};
+    size_t count = 0;
+    enum { cdataSize = 16 };
+    char cdata[cdataSize];
+
+    const wchar_t *svp = sv.data();
+    const wchar_t *svpe = svp + sv.size();
+    const wchar_t *nextFromW2C{};
+    char *nextToW2C{};
+
+    while (svp < svpe) {
+      // part 1: from wchar_t to char
+      auto resW2C = fW2C.out(mbstateW2C, svp, svpe, nextFromW2C, cdata,
+                             cdata + cdataSize, nextToW2C);
+      if (svp == nextFromW2C) {
+        break;
+      }
+      svp = nextFromW2C;
+      switch (resW2C) {
+      case codecvt_base::ok:
+      case codecvt_base::partial:
+        break;
+      case codecvt_base::error:
+      case codecvt_base::noconv:
+        goto L_break_while;
+      }
+
+      // part 2: from char to char32_t, redirect to width counter of char
+      count += __width_counter<char>::width(
+          basic_string_view<char>(cdata, nextToW2C - cdata), loc);
+      if (resW2C == codecvt_base::ok) {
+        break;
+      }
+    }
+  L_break_while:
+    return count;
+  }
+  static inline size_t width(wchar_t wc, const locale &loc) {
+    return width(basic_string_view<wchar_t>(&wc, 1), loc);
+  }
+};
+
+/**
+ * The buf to store unicode characters for width calculation.
+ */
+template <class CharT> class __unicode_buf;
+template <class CharT> class __unicode_buf {
+private:
+  enum { buflen = 4 };
+  CharT buf_[buflen];
+  uint8_t cur_{};
+  locale loc_;
+
+public:
+  explicit __unicode_buf(const locale &loc) : loc_(loc) {}
+  inline operator bool() const {
+    return 0 != __width_counter<CharT>::width(
+                    basic_string_view<CharT>(buf_, cur_), loc_);
+  }
+  inline void out(output_iterator<CharT> auto &it) {
+    copy(buf_, buf_ + cur_, it);
+  }
+  inline void reset() { cur_ = 0; }
+  inline size_t width() const {
+    return __width_counter<CharT>::width({buf_, cur_}, loc_);
+  }
+  inline size_t size() const { return cur_; }
+  inline decltype(auto) operator+=(CharT c) {
+    if (cur_ == buflen) {
+      __IMPLEMENTATION_BUG();
     }
     buf_[cur_++] = c;
     return *this;
   }
 };
-template <> class __unicode_buf<wchar_t> {
-private:
-  wchar_t c_;
 
-public:
-  operator bool() { return true; }
-  void out(output_iterator<wchar_t> auto &it) const { *it++ = c_; }
-  void reset() {}
-  size_t width() const { return 1; }
-  size_t size() const { return 1; }
-  decltype(auto) operator+=(wchar_t c) {
-    c_ = c;
-    return *this;
+template <class CharT> struct __formatter_iterator_impl {
+  forward_list<basic_string<CharT>>
+      list_; ///< list of strings to be merged on getting result
+  typename forward_list<basic_string<CharT>>::iterator
+      it_; ///< iterator to current string in the list
+  back_insert_iterator<basic_string<CharT>>
+      inserter_;            ///< the inserter of current string
+  size_t delayed_capacity_; ///< used for += string size cache
+
+  __formatter_iterator_impl() {
+    delayed_capacity_ = 0;
+    list_.emplace_after(list_.before_begin());
+    it_ = list_.begin();
+    inserter_ = back_inserter(*it_);
   }
-};
-template <class CharT> class __unicode_counter {
-public:
-  static size_t width(const basic_string_view<CharT> &s) {
-    __unicode_buf<CharT> buf_;
-    size_t res{};
-    for (auto &&c : s) {
-      if (buf_ += c) {
-        res += buf_.width();
-        buf_.reset();
-      }
+
+  basic_string<CharT> result() {
+    auto it = list_.begin();
+    auto &res = *it;
+    res.reserve(res.size() + delayed_capacity_);
+    while (++it != list_.end()) {
+      res += std::move(*it);
     }
-    return res;
+    return std::move(res);
+  }
+
+  inline decltype(auto) operator=(CharT c) { *inserter_++ = c; }
+
+  inline decltype(auto) operator=(basic_string<CharT> &&s) {
+    delayed_capacity_ += s.size();
+    it_ = list_.insert_after(it_, std::move(s));
+    inserter_ = back_inserter(*it_);
   }
 };
-
 /**
  * The formatter iterator is an output iterator that provides a wrapper of the
  * underlying iterator (say the back insert iterator). It behaves as if the
@@ -712,43 +800,26 @@ template <class CharT> class __formatter_iterator {
   friend __format_details::__public_func;
 
 private:
-  forward_list<basic_string<CharT>> list_;
-  typename forward_list<basic_string<CharT>>::iterator it_;
-  back_insert_iterator<basic_string<CharT>> inserter_;
+  __formatter_iterator_impl<CharT> *impl_;
 
 protected:
-  __formatter_iterator() {
-    list_.emplace_after(list_.before_begin());
-    it_ = list_.begin();
-    inserter_ = back_inserter(*it_);
-  }
+  __formatter_iterator(__formatter_iterator_impl<CharT> &impl) : impl_(&impl) {}
 
 public:
-  basic_string<CharT> result() {
-    auto it = list_.begin();
-    auto &res = *it;
-    while (++it != list_.end()) {
-      res += std::move(*it);
-    }
-    return std::move(res);
-  }
-  __formatter_iterator &operator=(CharT c) {
-    *inserter_++ = c;
+  inline basic_string<CharT> result() { return impl_->result(); }
+  inline __formatter_iterator &operator=(CharT c) {
+    impl_->operator=(c);
     return *this;
   }
-  __formatter_iterator &operator=(const __formatter_iterator &other) {
-    return *this;
-  }
-  __formatter_iterator &operator=(basic_string<CharT> &&s) {
-    it_ = list_.insert_after(it_, std::move(s));
-    inserter_ = back_inserter(*it_);
+  inline __formatter_iterator &operator=(basic_string<CharT> &&s) {
+    impl_->operator=(std::move(s));
     return *this;
   }
   // Those are all no-op operations for output iterators, only used to remain
   // consistency.
-  __formatter_iterator &operator*() { return *this; }
-  __formatter_iterator &operator++() { return *this; }
-  __formatter_iterator &operator++(int) { return *this; }
+  constexpr inline __formatter_iterator &operator*() { return *this; }
+  constexpr inline __formatter_iterator &operator++() { return *this; }
+  constexpr inline __formatter_iterator &operator++(int) { return *this; }
 };
 
 /**
@@ -763,7 +834,8 @@ private:
   __unicode_buf<CharT> unicode_buf_;
 
 public:
-  __counter_formatter_iterator() : count_(0) {}
+  __counter_formatter_iterator(const locale &loc)
+      : count_(0), unicode_buf_(loc) {}
   size_t count() const { return count_; }
 
   __counter_formatter_iterator &operator=(CharT c) {
@@ -773,13 +845,15 @@ public:
     }
     return *this;
   }
-  __counter_formatter_iterator &operator*() { return *this; }
-  __counter_formatter_iterator &operator++() { return *this; }
-  __counter_formatter_iterator &operator++(int) { return *this; }
+  constexpr inline __counter_formatter_iterator &operator*() { return *this; }
+  constexpr inline __counter_formatter_iterator &operator++() { return *this; }
+  constexpr inline __counter_formatter_iterator &operator++(int) {
+    return *this;
+  }
 };
 
 /**
- * Limited wrapper for format_n's. It limits the maximum operations of output.
+ * Limited wrapper for format_n's. It limits the maximum width of output.
  */
 template <class WrappedOutputIterator, class CharT>
 class __limited_formatter_iterator {
@@ -791,8 +865,9 @@ private:
   __unicode_buf<CharT> unicode_buf_;
 
 public:
-  __limited_formatter_iterator(WrappedOutputIterator &c, size_t maxOp)
-      : it_(c), avail_(maxOp) {}
+  __limited_formatter_iterator(WrappedOutputIterator &c, size_t maxOp,
+                               const locale &loc)
+      : it_(c), avail_(maxOp), unicode_buf_(loc) {}
   size_t avail() const { return avail_; }
   WrappedOutputIterator out() const { return it_; }
 
@@ -811,9 +886,11 @@ public:
     }
     return *this;
   }
-  __limited_formatter_iterator &operator*() { return *this; }
-  __limited_formatter_iterator &operator++() { return *this; }
-  __limited_formatter_iterator &operator++(int) { return *this; }
+  constexpr inline __limited_formatter_iterator &operator*() { return *this; }
+  constexpr inline __limited_formatter_iterator &operator++() { return *this; }
+  constexpr inline __limited_formatter_iterator &operator++(int) {
+    return *this;
+  }
 };
 
 template <class CharT> struct __formatter_base {
@@ -836,10 +913,10 @@ private:
   bool sharp_ : 1;           ///< '#'
   bool zero_ : 1;            ///< '0'
   bool locale_specific_ : 1; ///< 'L'
-  CharT fill_char_;
-  enum : int { width_none = -1, precision_none = -1, type_none = 0 };
   bool width_nested_ : 1;
   bool precision_nested_ : 1;
+  CharT fill_char_;
+  enum : int { width_none = -1, precision_none = -1, type_none = 0 };
   CharT type_;
   union {
     int width_;
@@ -1004,8 +1081,12 @@ private:
     __THROW_FORMAT_ERROR("invalid format type");
   }
 
-  auto __fill_and_output_wrap(int widthBeforeFill, auto &&func, auto &fc) {
-    auto &width = widthBeforeFill;
+  /**
+   * Fill with fill char and output to fc.out(). This calculate the output width
+   * using __width_counter, sv is either a string or a string_view.
+   */
+  auto __fill_and_output(auto &&sv, auto &fc) {
+    auto width = __width_counter<CharT>::width(sv, fc.locale());
     size_t fillL = 0, fillR = 0;
 
     if (width_ != width_none && width < width_) {
@@ -1025,53 +1106,40 @@ private:
       }
     }
 
+    if constexpr (is_same_v<wchar_t, decltype(fill_char_)>) {
+      // fill char may only be full width for wchar_t.
+      auto fillW = __width_counter<wchar_t>::width(fill_char_, fc.locale());
+      if (fillW == 2) {
+        fillL = (fillL + 1) / 2;
+        fillR /= 2;
+      }
+    }
+
     auto out = fc.out();
     // left fill
     for (size_t i = 0; i < fillL; ++i) {
       *out++ = fill_char_;
     }
-    // core part
-    out = func();
+    // core number part
+    if constexpr (requires {
+                    { *out++ = std::move(sv) }
+                    ->same_as<decltype(out)>;
+                  }) {
+      // For a string, if the output iterator is __formatter_iterator,
+      // we make use of that temporary string.
+      *out++ = std::move(sv);
+    } else {
+      // otherwise, just output one by one.
+      for (auto &&c : sv) {
+        *out++ = c;
+      }
+    }
     // right fill
     for (size_t i = 0; i < fillR; ++i) {
       *out++ = fill_char_;
     }
 
     return out;
-  }
-
-  auto __fill_and_output(basic_string<CharT> &&str, auto &fc) {
-    return __fill_and_output_wrap(
-        __unicode_counter<CharT>::width(str),
-        [&str, &fc] {
-          auto out = fc.out();
-          if constexpr (requires {
-                          { *out++ = std::move(str) }
-                          ->same_as<decltype(out)>;
-                        }) {
-            // make use of the string for raw formatter iterator
-            *out++ = std::move(str);
-          } else {
-            for (auto &&c : str) {
-              *out++ = c;
-            }
-          }
-          return out;
-        },
-        fc);
-  }
-
-  auto __fill_and_output(const basic_string_view<CharT> &sv, auto &fc) {
-    return __fill_and_output_wrap(
-        __unicode_counter<CharT>::width(sv),
-        [&sv, &fc] {
-          auto out = fc.out();
-          for (auto &&c : sv) {
-            *out++ = c;
-          }
-          return out;
-        },
-        fc);
   }
 
   template <class OutputIt>
@@ -1122,7 +1190,6 @@ private:
     if (align_ == align::none) {
       align_ = align::right;
     }
-    type_ = 's';
     return __fill_and_output(basic_string_view(buf, bufit), fc);
   }
 
@@ -1586,10 +1653,19 @@ namespace __format_details {
 // Helper struct to implement global format functions.
 struct __public_func {
 private:
-  friend string std::vformat(const locale &, string_view fmt, format_args args);
-  friend wstring std::vformat(const locale &, wstring_view fmt,
+  friend string std::vformat(string_view fmt, format_args args);
+  friend wstring std::vformat(wstring_view fmt, wformat_args args);
+  friend string std::vformat(const locale &loc, string_view fmt,
+                             format_args args);
+  friend wstring std::vformat(const locale &loc, wstring_view fmt,
                               wformat_args args);
 
+  template <class Out>
+  friend Out std::vformat_to(Out out, string_view fmt,
+                             format_args_t<type_identity_t<Out>, char> args);
+  template <class Out>
+  friend Out std::vformat_to(Out out, wstring_view fmt,
+                             format_args_t<type_identity_t<Out>, wchar_t> args);
   template <class Out>
   friend Out std::vformat_to(Out out, const locale &loc, string_view fmt,
                              format_args_t<type_identity_t<Out>, char> args);
@@ -1599,6 +1675,14 @@ private:
 
   template <class Out, class... Args>
   friend format_to_n_result<Out>
+  std::format_to_n(Out out, iter_difference_t<Out> n, string_view fmt,
+                   const Args &... args);
+  template <class Out, class... Args>
+  friend format_to_n_result<Out>
+  std::format_to_n(Out out, iter_difference_t<Out> n, wstring_view fmt,
+                   const Args &... args);
+  template <class Out, class... Args>
+  friend format_to_n_result<Out>
   std::format_to_n(Out out, iter_difference_t<Out> n, const locale &loc,
                    string_view fmt, const Args &... args);
   template <class Out, class... Args>
@@ -1606,6 +1690,10 @@ private:
   std::format_to_n(Out out, iter_difference_t<Out> n, const locale &loc,
                    wstring_view fmt, const Args &... args);
 
+  template <class... Args>
+  friend size_t std::formatted_size(string_view fmt, const Args &... args);
+  template <class... Args>
+  friend size_t std::formatted_size(wstring_view fmt, const Args &... args);
   template <class... Args>
   friend size_t std::formatted_size(const locale &loc, string_view fmt,
                                     const Args &... args);
@@ -1659,6 +1747,17 @@ private:
     }
   };
 
+  inline static const locale &__default_locale() {
+    static locale loc = [] {
+      try {
+        return locale("C.UTF-8");
+      } catch (...) {
+        return locale("");
+      }
+    }();
+    return loc;
+  }
+
   template <class OutputIt, class CharT>
   static OutputIt vformat_to(OutputIt &out, const locale &loc,
                              const basic_string_view<CharT> &fmt,
@@ -1670,7 +1769,7 @@ private:
     // TODO: what is the second argument used for?
     basic_format_parse_context<CharT> pc(fmt, argsSize);
 
-    for (auto it = pc.begin(); it != pc.end();) {
+    for (auto it = pc.begin(), ite = pc.end(); it != ite;) {
       if (*it != '{' && *it != '}') {
         // characters other than '{' and '}' are just copied directly
         *out++ = *it++;
@@ -1681,7 +1780,7 @@ private:
         // process the argument index if exists, and [it, ite) currently stands
         // for the range of index field.
         ++it;
-        __throw_invalid_format_if(it == pc.end());
+        __throw_invalid_format_if(it == ite);
         if (*it == '{') {
           // convert "{{" to "{" and copy to the output directly
           *out++ = *it++;
@@ -1699,10 +1798,10 @@ private:
         } else {
           argIdx = pc.next_arg_id();
         }
-        __throw_invalid_format_if(it == pc.end());
+        __throw_invalid_format_if(it == ite);
         if (*it == ':') {
           ++it;
-          __throw_invalid_format_if(it == pc.end());
+          __throw_invalid_format_if(it == ite);
         }
         // update the iterator in pc first.
         pc.advance_to(it);
@@ -1713,12 +1812,12 @@ private:
         }
         // after the parse, pc.begin() must point at '}'
         it = pc.begin();
-        __throw_invalid_format_if(it == pc.end() || *it != '}');
+        __throw_invalid_format_if(it == ite || *it != '}');
         ++it;
       } else /*if (c == '}')*/ {
         // now, only "}}" is accepted
         ++it;
-        __throw_invalid_format_if(it == pc.end() || *it != '}');
+        __throw_invalid_format_if(it == ite || *it != '}');
         // copy the '}' directly
         *out++ = *it++;
         continue;
@@ -1730,15 +1829,17 @@ private:
 
   inline static string vformat(const locale &loc, const string_view &fmt,
                                const format_args &args) {
-    __formatter_iterator<char> it;
-    vformat_to(it, loc, fmt, args);
+    __formatter_iterator_impl<char> itImpl;
+    __formatter_iterator<char> it(itImpl);
+    it = vformat_to(it, loc, fmt, args);
     return it.result();
   }
 
   inline static wstring vformat(const locale &loc, const wstring_view &fmt,
                                 const wformat_args &args) {
-    __formatter_iterator<wchar_t> it;
-    vformat_to(it, loc, fmt, args);
+    __formatter_iterator_impl<wchar_t> itImpl;
+    __formatter_iterator<wchar_t> it(itImpl);
+    it = vformat_to(it, loc, fmt, args);
     return it.result();
   }
 
@@ -1749,7 +1850,7 @@ private:
     using iterator_t = __limited_formatter_iterator<OutputIt, CharT>;
     using context_t = basic_format_context<iterator_t, CharT>;
     auto N = n > 0 ? n : 0;
-    iterator_t it(out, N);
+    iterator_t it(out, N, loc);
     it = vformat_to(it, loc, fmt,
                     basic_format_args(make_format_args<context_t>(args...)));
     decltype(n) written = N - it.avail();
@@ -1762,7 +1863,7 @@ private:
                                const Args &... args) {
     using iterator_t = __counter_formatter_iterator<CharT>;
     using context_t = basic_format_context<iterator_t, CharT>;
-    iterator_t it{};
+    iterator_t it(loc);
     it = vformat_to(it, loc, fmt,
                     basic_format_args(make_format_args<context_t>(args...)));
     return it.count();
@@ -1790,10 +1891,12 @@ inline wstring format(const locale &loc, wstring_view fmt,
 }
 
 inline string vformat(string_view fmt, format_args args) {
-  return vformat(locale::classic(), fmt, std::move(args));
+  return vformat(__format_details::__public_func::__default_locale(), fmt,
+                 std::move(args));
 }
 inline wstring vformat(wstring_view fmt, wformat_args args) {
-  return vformat(locale::classic(), fmt, std::move(args));
+  return vformat(__format_details::__public_func::__default_locale(), fmt,
+                 std::move(args));
 }
 inline string vformat(const locale &loc, string_view fmt, format_args args) {
   return __format_details::__public_func::vformat(loc, fmt, std::move(args));
@@ -1804,12 +1907,14 @@ inline wstring vformat(const locale &loc, wstring_view fmt, wformat_args args) {
 
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, string_view fmt, const Args &... args) {
-  return format_to(out, locale::classic(), fmt, args...);
+  using context_t = basic_format_context<type_identity_t<OutputIt>, char>;
+  return vformat_to(out, fmt, make_format_args<context_t>(args...));
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, wstring_view fmt,
                           const Args &... args) {
-  return format_to(out, locale::classic(), fmt, args...);
+  using context_t = basic_format_context<type_identity_t<OutputIt>, wchar_t>;
+  return vformat_to(out, fmt, make_format_args<context_t>(args...));
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, const locale &loc, string_view fmt,
@@ -1828,13 +1933,15 @@ template <class OutputIt>
 inline OutputIt
 vformat_to(OutputIt out, string_view fmt,
            format_args_t<type_identity_t<OutputIt>, char> args) {
-  return vformat_to(out, locale::classic(), fmt, std::move(args));
+  return vformat_to(out, __format_details::__public_func::__default_locale(),
+                    fmt, std::move(args));
 }
 template <class OutputIt>
 inline OutputIt
 vformat_to(OutputIt out, wstring_view fmt,
            format_args_t<type_identity_t<OutputIt>, wchar_t> args) {
-  return vformat_to(out, locale::classic(), fmt, std::move(args));
+  return vformat_to(out, __format_details::__public_func::__default_locale(),
+                    fmt, std::move(args));
 }
 template <class OutputIt>
 inline OutputIt
@@ -1855,13 +1962,17 @@ template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, string_view fmt,
             const Args &... args) {
-  return format_to_n(out, n, locale::classic(), fmt, args...);
+  return format_to_n(out, n,
+                     __format_details::__public_func::__default_locale(), fmt,
+                     args...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, wstring_view fmt,
             const Args &... args) {
-  return format_to_n(out, n, locale::classic(), fmt, args...);
+  return format_to_n(out, n,
+                     __format_details::__public_func::__default_locale(), fmt,
+                     args...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
@@ -1882,11 +1993,13 @@ format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
 
 template <class... Args>
 inline size_t formatted_size(string_view fmt, const Args &... args) {
-  return formatted_size(locale::classic(), fmt, args...);
+  return formatted_size(__format_details::__public_func::__default_locale(),
+                        fmt, args...);
 }
 template <class... Args>
 inline size_t formatted_size(wstring_view fmt, const Args &... args) {
-  return formatted_size(locale::classic(), fmt, args...);
+  return formatted_size(__format_details::__public_func::__default_locale(),
+                        fmt, args...);
 }
 template <class... Args>
 inline size_t formatted_size(const locale &loc, string_view fmt,
