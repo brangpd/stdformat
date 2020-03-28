@@ -49,10 +49,21 @@ template <> struct std::formatter<S> {
   }
 };
 
+struct slash : std::numpunct<char> {
+  char do_decimal_point() const { return '/'; } // separate with slash
+};
+
 int main(int argc, char *argv[]) {
   cout << format("你好{:`>6}", "世界") << endl;
   cout << format("你好{:`<6}", "世界") << endl;
   cout << format("你好{:`^6}", "世界") << endl;
+
+  cout << format(locale(locale::classic(), new slash), "{:L}", 1234.5678)
+       << endl;
+
+  cout << format("{:`^+20f}", 42.0) << endl;
+  cout << format("{:+020f}", 42.0) << endl;
+  cout << format("{:`<+20f}", 42.0) << endl;
 
   wstring_convert<codecvt_utf8<wchar_t>> cvt;
   cout << cvt.to_bytes(format(L"你好{:`>6}", L"世界")) << endl;
@@ -60,8 +71,7 @@ int main(int argc, char *argv[]) {
   cout << cvt.to_bytes(format(L"你好{:`^6}", L"世界")) << endl;
 
   cout << format("{1}``{0}", "世界", "你好") << endl;
-  cout << format("{:0b}", (short)-1, S{42}) << endl;
-  cout << u8string(u8"我").size() << endl;
+  cout << format("{:0b}", (short)-1) << endl;
   cout << formatted_size("{}", "我") << endl;
   cout << format("{:`>10}", "我") << endl;
   cout << format("{:`<10}", numeric_limits<float>::quiet_NaN()) << endl;

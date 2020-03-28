@@ -569,43 +569,47 @@ public:
 };
 
 namespace __format_details {
+/**
+ * For output, full width character should be treated as width of 2. The width
+ * appears in the formatting string means the displaying width in the terminal
+ * instead of the length it is encoded. A basic width counter provide the width
+ * calculation given a value of char32_t (UTF-32) which is exactly equal to the
+ * code point's numerical value.
+ */
 class __basic_width_counter {
-protected:
+  template <class> friend class __width_counter;
+  /**
+   * Given a character of char32_t, calculate its width.
+   * @param cd The UTF-32 encoded character.
+   * @return 2 if the character is full width, or 1 if half width.
+   */
   static size_t width(char32_t cd) {
-    if (cd >= 0x1100 && cd <= 0x115f) {
-      return 2;
+    // ASCII codes would be used more often so provide a quick check.
+    if (cd < 128) {
+      return 1;
     }
-    if (cd >= 0x2329 && cd <= 0x232a) {
-      return 2;
-    }
-    if (cd >= 0x2e80 && cd <= 0x303e) {
-      return 2;
-    }
-    if (cd >= 0x3040 && cd <= 0xa4cf) {
-      return 2;
-    }
-    if (cd >= 0xac00 && cd <= 0xd7a3) {
-      return 2;
-    }
-    if (cd >= 0xf900 && cd <= 0xfaff) {
-      return 2;
-    }
-    if (cd >= 0xfe30 && cd <= 0xfe6f) {
-      return 2;
-    }
-    if (cd >= 0xff00 && cd <= 0xff60) {
-      return 2;
-    }
-    if (cd >= 0xffe0 && cd <= 0xffe6) {
-      return 2;
-    }
-    if (cd >= 0x1f900 && cd <= 0x1f9ff) {
-      return 2;
-    }
-    if (cd >= 0x20000 && cd <= 0x2fffd) {
-      return 2;
-    }
-    if (cd >= 0x3000 && cd <= 0x3fffd) {
+    // following code points pairs are ranges of full width character
+    static constexpr int codes[][2] = {
+        {0, -1}, // for binary search convenience
+        {0x1100, 0x115f},
+        {0x2329, 0x232a},
+        {0x2e80, 0x303e},
+        {0x3040, 0xa4cf},
+        {0xac00, 0xd7a3},
+        {0xf900, 0xfaff},
+        {0xfe30, 0xfe6f},
+        {0xff00, 0xff60},
+        {0xffe0, 0xffe6},
+        {0x1f900, 0x1f9ff},
+        {0x20000, 0x2fffd},
+        {0x30000, 0x3fffd},
+    };
+    auto it =
+        upper_bound(begin(codes), end(codes), cd,
+                    [](char32_t v, const int it[2]) { return v < it[0]; });
+    auto pair = it[-1];
+    // now cd >= pair[0]
+    if (cd <= pair[1]) {
       return 2;
     }
     return 1;
@@ -615,7 +619,7 @@ template <class CharT> class __width_counter;
 /**
  * Width counter for char.
  */
-template <> class __width_counter<char> : __basic_width_counter {
+template <> class __width_counter<char> {
 public:
   static size_t width(const basic_string_view<char> &sv, const locale &loc) {
     enum { buflen = 16 };
@@ -665,7 +669,7 @@ public:
 /**
  * Width counter for wchar_t.
  */
-template <> class __width_counter<wchar_t> : __basic_width_counter {
+template <> class __width_counter<wchar_t> {
 public:
   static size_t width(const basic_string_view<wchar_t> &sv, const locale &loc) {
     // Since standard library does not provide code converter from wchar_t to
@@ -673,9 +677,9 @@ public:
     // character to char32_t
 
     // FIXME: deprecated, use char8_t instead of char
-    using cvtW2C = codecvt<wchar_t, char, mbstate_t>;
-    auto &&fW2C = use_facet<cvtW2C>(loc); // wchat_t to char
-    mbstate_t mbstateW2C{};               // wchar_t to char & char to char32_t
+    using cvt = codecvt<wchar_t, char, mbstate_t>;
+    auto &&f = use_facet<cvt>(loc); // wchat_t to char
+    mbstate_t mbstate{};
 
     char32_t c32{};
     size_t count = 0;
@@ -684,18 +688,18 @@ public:
 
     const wchar_t *svp = sv.data();
     const wchar_t *svpe = svp + sv.size();
-    const wchar_t *nextFromW2C{};
-    char *nextToW2C{};
+    const wchar_t *fromNext{};
+    char *toNext{};
 
     while (svp < svpe) {
       // part 1: from wchar_t to char
-      auto resW2C = fW2C.out(mbstateW2C, svp, svpe, nextFromW2C, cdata,
-                             cdata + cdataSize, nextToW2C);
-      if (svp == nextFromW2C) {
+      auto outRes =
+          f.out(mbstate, svp, svpe, fromNext, cdata, cdata + cdataSize, toNext);
+      if (svp == fromNext) {
         break;
       }
-      svp = nextFromW2C;
-      switch (resW2C) {
+      svp = fromNext;
+      switch (outRes) {
       case codecvt_base::ok:
       case codecvt_base::partial:
         break;
@@ -706,8 +710,8 @@ public:
 
       // part 2: from char to char32_t, redirect to width counter of char
       count += __width_counter<char>::width(
-          basic_string_view<char>(cdata, nextToW2C - cdata), loc);
-      if (resW2C == codecvt_base::ok) {
+          basic_string_view<char>(cdata, toNext - cdata), loc);
+      if (outRes == codecvt_base::ok) {
         break;
       }
     }
@@ -722,7 +726,6 @@ public:
 /**
  * The buf to store unicode characters for width calculation.
  */
-template <class CharT> class __unicode_buf;
 template <class CharT> class __unicode_buf {
 private:
   enum { buflen = 4, width_dirty = -1 };
@@ -736,7 +739,7 @@ public:
   inline operator bool() const { return width(); }
   inline void out(output_iterator<CharT> auto &it) {
     if (*this) {
-      copy(buf_, buf_ + cur_, it);
+      it = copy(buf_, buf_ + cur_, it);
     }
   }
   inline void reset() {
@@ -753,6 +756,7 @@ public:
     if (cur_ == buflen) {
       __IMPLEMENTATION_BUG();
     }
+    width_ = width_dirty;
     buf_[cur_++] = c;
     return *this;
   }
@@ -785,11 +789,15 @@ template <class CharT> struct __formatter_iterator_impl {
   }
 
   inline decltype(auto) operator=(CharT c) { *inserter_++ = c; }
-
   inline decltype(auto) operator=(basic_string<CharT> &&s) {
     delayed_capacity_ += s.size();
     it_ = list_.insert_after(it_, std::move(s));
     inserter_ = back_inserter(*it_);
+  }
+  inline decltype(auto) operator=(const basic_string_view<CharT> &sv) {
+    auto size = it_->size();
+    it_->resize(size + sv.size(), 0);
+    copy(sv.begin(), sv.end(), it_->data() + size);
   }
 };
 /**
@@ -812,12 +820,16 @@ protected:
 
 public:
   inline basic_string<CharT> result() { return impl_->result(); }
-  inline __formatter_iterator &operator=(CharT c) {
+  inline decltype(auto) operator=(CharT c) {
     impl_->operator=(c);
     return *this;
   }
-  inline __formatter_iterator &operator=(basic_string<CharT> &&s) {
+  inline decltype(auto) operator=(basic_string<CharT> &&s) {
     impl_->operator=(std::move(s));
+    return *this;
+  }
+  inline decltype(auto) operator=(const basic_string_view<CharT> &sv) {
+    impl_->operator=(sv);
     return *this;
   }
   // Those are all no-op operations for output iterators, only used to remain
@@ -1125,6 +1137,7 @@ private:
       __caseof(G);
       __caseof(o);
       __caseof(p);
+      __caseof(s);
       __caseof(x);
       __caseof(X);
 #undef __caseof
@@ -1192,17 +1205,14 @@ private:
     }
     // core number part
     if constexpr (requires {
-                    { *out++ = std::move(sv) }
-                    ->same_as<decltype(out)>;
+                    { *out++ = std::forward<decltype(sv)>(sv) };
                   }) {
       // For a string, if the output iterator is __formatter_iterator,
       // we make use of that temporary string.
-      *out++ = std::move(sv);
+      *out++ = std::forward<decltype(sv)>(sv);
     } else {
       // otherwise, just output one by one.
-      for (auto &&c : sv) {
-        *out++ = c;
-      }
+      out = copy(sv.begin(), sv.end(), out);
     }
     // right fill
     for (size_t i = 0; i < fillR; ++i) {
