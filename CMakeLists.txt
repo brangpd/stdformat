@@ -5,19 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(CMAKE_INCLUDE_CURRENT_DIR ON)
-add_library(stdformat
-		format
-		charconv __charconv.cpp
-		)
-set_target_properties(stdformat PROPERTIES LINKER_LANGUAGE CXX)
+add_subdirectory(lib)
+add_subdirectory(test)
 
 add_library(ATestClass ATestClass.cpp)
-add_executable(main main.cpp)
-target_link_libraries(main ATestClass stdformat)
-
-find_package(GTest REQUIRED)
-enable_testing()
-add_executable(format_test format_test.cpp)
-add_test(format_test format_test)
-target_link_libraries(format_test GTest::Main stdformat)
+target_link_libraries(ATestClass stdformat)
+add_executable(example main.cpp)
+target_link_libraries(example stdformat ATestClass)
