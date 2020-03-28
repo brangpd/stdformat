@@ -1204,9 +1204,7 @@ private:
       *out++ = fill_char_;
     }
     // core number part
-    if constexpr (requires {
-                    { *out++ = std::forward<decltype(sv)>(sv) };
-                  }) {
+    if constexpr (requires { { *out++ = std::forward<decltype(sv)>(sv)}; }) {
       // For a string, if the output iterator is __formatter_iterator,
       // we make use of that temporary string.
       *out++ = std::forward<decltype(sv)>(sv);
@@ -1231,11 +1229,8 @@ private:
     using unsigned_t = make_unsigned_t<decltype(t)>;
     unsigned_t ut = t >= 0 ? t : static_cast<unsigned_t>(-t);
     // prepare to redirect to string format
-    basic_string<CharT> str{};
-    str.reserve(numeric_limits<unsigned_t>::digits + 1 /*sign*/ + 2 /*0B*/);
-    auto bufit = back_inserter(str);
-    //    CharT buf[numeric_limits<unsigned_t>::digits + 1 /*sign*/ + 2 /*0B*/];
-    //    auto bufit = buf;
+    CharT buf[numeric_limits<uintmax_t>::digits + 1 /*sign*/ + 2 /*0B*/];
+    auto bufit = buf;
     if (t < 0) {
       *bufit++ = '-';
     } else {
@@ -1273,8 +1268,7 @@ private:
     if (align_ == align::none) {
       align_ = align::right;
     }
-    str.shrink_to_fit();
-    return __fill_and_output(std::move(str), fc);
+    return __fill_and_output(basic_string_view<CharT>(buf, bufit - buf), fc);
   }
 
   template <class OutputIt>
