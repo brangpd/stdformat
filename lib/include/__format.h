@@ -666,6 +666,7 @@ public:
   }
   static inline size_t width(char, const locale &) { return 1; }
 };
+extern template class __width_counter<char>;
 /**
  * Width counter for wchar_t.
  */
@@ -722,6 +723,7 @@ public:
     return width(basic_string_view<wchar_t>(&wc, 1), loc);
   }
 };
+extern template class __width_counter<wchar_t>;
 
 /**
  * The buf to store unicode characters for width calculation.
@@ -737,7 +739,7 @@ private:
 public:
   explicit __unicode_buf(const locale &loc) : loc_(loc) {}
   inline operator bool() const { return width(); }
-  inline void out(output_iterator<CharT> auto &it) {
+  inline void out(auto &it) {
     if (*this) {
       it = copy(buf_, buf_ + cur_, it);
     }
@@ -761,8 +763,10 @@ public:
     return *this;
   }
 };
+extern template class __unicode_buf<char>;
+extern template class __unicode_buf<wchar_t>;
 
-template <class CharT> struct __formatter_iterator_impl {
+template <class CharT> class __formatter_iterator_impl {
   forward_list<basic_string<CharT>>
       list_; ///< list of strings to be merged on getting result
   typename forward_list<basic_string<CharT>>::iterator
@@ -771,6 +775,7 @@ template <class CharT> struct __formatter_iterator_impl {
       inserter_;            ///< the inserter of current string
   size_t delayed_capacity_; ///< used for += string size cache
 
+public:
   __formatter_iterator_impl() {
     delayed_capacity_ = 0;
     list_.emplace_after(list_.before_begin());
@@ -800,6 +805,8 @@ template <class CharT> struct __formatter_iterator_impl {
     copy(sv.begin(), sv.end(), it_->data() + size);
   }
 };
+extern template class __formatter_iterator_impl<char>;
+extern template class __formatter_iterator_impl<wchar_t>;
 /**
  * The formatter iterator is an output iterator that provides a wrapper of the
  * underlying iterator (say the back insert iterator). It behaves as if the
@@ -819,6 +826,8 @@ protected:
   __formatter_iterator(__formatter_iterator_impl<CharT> &impl) : impl_(&impl) {}
 
 public:
+  __formatter_iterator(const __formatter_iterator &other)
+      : impl_(other.impl_) {}
   inline basic_string<CharT> result() { return impl_->result(); }
   inline decltype(auto) operator=(CharT c) {
     impl_->operator=(c);
@@ -838,6 +847,8 @@ public:
   constexpr inline decltype(auto) operator++() { return *this; }
   constexpr inline decltype(auto) operator++(int) { return *this; }
 };
+extern template class __formatter_iterator<char>;
+extern template class __formatter_iterator<wchar_t>;
 
 /**
  * Counter wrapper for formatted_size's. It does not write any character but
@@ -867,6 +878,8 @@ public:
   constexpr inline decltype(auto) operator++() { return *this; }
   constexpr inline decltype(auto) operator++(int) { return *this; }
 };
+extern template class __width_counter_formatter_iterator<char>;
+extern template class __width_counter_formatter_iterator<wchar_t>;
 
 /**
  * Counter wrapper for formatted_size's. It does not write any character but
@@ -891,6 +904,8 @@ public:
   constexpr inline decltype(auto) operator++() { return *this; }
   constexpr inline decltype(auto) operator++(int) { return *this; }
 };
+extern template class __counter_formatter_iterator<char>;
+extern template class __counter_formatter_iterator<wchar_t>;
 
 /**
  * Limited wrapper for format_n's. It limits the maximum width of output.
@@ -930,6 +945,10 @@ public:
   constexpr inline decltype(auto) operator++() { return *this; }
   constexpr inline decltype(auto) operator++(int) { return *this; }
 };
+extern template class __limited_formatter_iterator<__formatter_iterator<char>,
+                                                   char>;
+extern template class __limited_formatter_iterator<
+    __formatter_iterator<wchar_t>, wchar_t>;
 
 /**
  * Unfortunately, the GNU C++ library does not provide specalizations for
@@ -1725,6 +1744,8 @@ public:
     return __format(t, fc);
   }
 };
+extern template class __formatter_base<char>;
+extern template class __formatter_base<wchar_t>;
 } // namespace __format_details
 
 ///@{ Standard specializations for basic types and string types
@@ -1787,6 +1808,38 @@ template <class ArithmeticT, __format_details::__char_t CharT>
 template <__format_details::__one_of<nullptr_t, void *, const void *> PtrT,
           __format_details::__char_t CharT>
 struct formatter<PtrT, CharT> : __format_details::__formatter_base<CharT> {};
+
+extern template struct formatter<char, char>;
+extern template struct formatter<char, wchar_t>;
+extern template struct formatter<wchar_t, wchar_t>;
+extern template struct formatter<char *, char>;
+extern template struct formatter<wchar_t *, wchar_t>;
+extern template struct formatter<const char *, char>;
+extern template struct formatter<const wchar_t *, wchar_t>;
+extern template struct formatter<string, char>;
+extern template struct formatter<wstring, wchar_t>;
+extern template struct formatter<string_view, char>;
+extern template struct formatter<wstring_view, wchar_t>;
+extern template struct formatter<int, char>;
+extern template struct formatter<int, wchar_t>;
+extern template struct formatter<unsigned int, char>;
+extern template struct formatter<unsigned int, wchar_t>;
+extern template struct formatter<long long, char>;
+extern template struct formatter<long long, wchar_t>;
+extern template struct formatter<unsigned long long, char>;
+extern template struct formatter<unsigned long long, wchar_t>;
+extern template struct formatter<float, char>;
+extern template struct formatter<float, wchar_t>;
+extern template struct formatter<double, char>;
+extern template struct formatter<double, wchar_t>;
+extern template struct formatter<long double, char>;
+extern template struct formatter<long double, wchar_t>;
+extern template struct formatter<nullptr_t, char>;
+extern template struct formatter<nullptr_t, wchar_t>;
+extern template struct formatter<void *, char>;
+extern template struct formatter<void *, wchar_t>;
+extern template struct formatter<const void *, char>;
+extern template struct formatter<const void *, wchar_t>;
 ///@}
 
 namespace __format_details {

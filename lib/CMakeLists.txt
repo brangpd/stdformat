@@ -6,7 +6,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include_directories(include)
 add_library(stdformat
-		include/format
+		include/format src/__format.cpp
 		include/charconv src/__charconv.cpp
 		)
 set_target_properties(stdformat PROPERTIES LINKER_LANGUAGE CXX)
