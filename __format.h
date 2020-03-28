@@ -1421,10 +1421,16 @@ private:
         // digits in total for those who has its exponent less than 100 and 13
         // digits otherwise. Therefore, a value with less than 5 digits before
         // the radix point would be treated as fixed, and the others scientific.
-        if (static_cast<decltype(t)>(1e5 - 1e-7) > t) {
-          iosb.setf(ios::fixed, ios::floatfield);
-        } else {
+
+        // The solution is to compare t with (double)99999.9999995.
+        // for floats, 99999.9999995 uses
+        // more bits of mantissa a float can hold;
+        // for doubles or long doubles, they use more bits of mantissa and the
+        // rounding correctly works.
+        if (99999.9999995 < t) {
           iosb.setf(ios::scientific, ios::floatfield);
+        } else {
+          iosb.setf(ios::fixed, ios::floatfield);
         }
       }
       break;
