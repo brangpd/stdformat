@@ -290,7 +290,7 @@ template <class CharT, class Trait>
 struct __is_string<basic_string_view<CharT, Trait>> : true_type {};
 template <class CharT, class Trait, class Alloc>
 struct __is_string<basic_string<CharT, Trait, Alloc>> : true_type {};
-template <class CharT> struct __is_string<const CharT *> : true_type {};
+template <__char_t CharT> struct __is_string<const CharT *> : true_type {};
 template <class T> constexpr bool __is_string_v = __is_string<T>::value;
 
 template <class T> struct __is_pointer : false_type{};

@@ -54,6 +54,9 @@ struct slash : std::numpunct<char> {
 };
 
 int main(int argc, char *argv[]) {
+  cout << format("{:p}", nullptr) << endl;
+  cout << format("{:p}", (void *)nullptr) << endl;
+
   cout << format("你好{:`>6}", "世界") << endl;
   cout << format("你好{:`<6}", "世界") << endl;
   cout << format("你好{:`^6}", "世界") << endl;
