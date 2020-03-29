@@ -597,9 +597,11 @@ class __basic_width_counter {
         {0x3040, 0xa4cf},
         {0xac00, 0xd7a3},
         {0xf900, 0xfaff},
+        {0xfe10, 0xfe19},
         {0xfe30, 0xfe6f},
         {0xff00, 0xff60},
         {0xffe0, 0xffe6},
+        {0x1f300, 0x1f64f},
         {0x1f900, 0x1f9ff},
         {0x20000, 0x2fffd},
         {0x30000, 0x3fffd},
@@ -1519,8 +1521,12 @@ private:
   __format(const basic_string_view<CharT> &t,
            basic_format_context<OutputIt, CharT> &fc) {
     if (precision_ != precision_none) {
-      // TODO: calculate width
-      return __fill_and_output(t.substr(0, precision_), fc);
+      basic_string<CharT> str;
+      auto inserter = back_inserter(str);
+      __limited_formatter_iterator<decltype(inserter), CharT> lfit(
+          inserter, precision_, fc.locale());
+      copy(t.begin(), t.end(), lfit);
+      return __fill_and_output(std::move(str), fc);
     } else {
       return __fill_and_output(t, fc);
     };
