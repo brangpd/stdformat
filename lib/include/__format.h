@@ -769,42 +769,17 @@ extern template class __unicode_buf<char>;
 extern template class __unicode_buf<wchar_t>;
 
 template <class CharT> class __formatter_iterator_impl {
-  forward_list<basic_string<CharT>>
-      list_; ///< list of strings to be merged on getting result
-  typename forward_list<basic_string<CharT>>::iterator
-      it_; ///< iterator to current string in the list
-  back_insert_iterator<basic_string<CharT>>
-      inserter_;            ///< the inserter of current string
-  size_t delayed_capacity_; ///< used for += string size cache
+  basic_string<CharT> res_;
 
 public:
-  __formatter_iterator_impl() {
-    delayed_capacity_ = 0;
-    list_.emplace_after(list_.before_begin());
-    it_ = list_.begin();
-    inserter_ = back_inserter(*it_);
-  }
+  basic_string<CharT> result() { return std::move(res_); }
 
-  basic_string<CharT> result() {
-    auto it = list_.begin();
-    auto &res = *it;
-    res.reserve(res.size() + delayed_capacity_);
-    while (++it != list_.end()) {
-      res += std::move(*it);
-    }
-    return std::move(res);
-  }
-
-  inline decltype(auto) operator=(CharT c) { *inserter_++ = c; }
+  inline decltype(auto) operator=(CharT c) { res_.operator+=(c); }
   inline decltype(auto) operator=(basic_string<CharT> &&s) {
-    delayed_capacity_ += s.size();
-    it_ = list_.insert_after(it_, std::move(s));
-    inserter_ = back_inserter(*it_);
+    res_.operator+=(std::move(s));
   }
   inline decltype(auto) operator=(const basic_string_view<CharT> &sv) {
-    auto size = it_->size();
-    it_->resize(size + sv.size(), 0);
-    copy(sv.begin(), sv.end(), it_->data() + size);
+    res_.operator+=(sv);
   }
 };
 extern template class __formatter_iterator_impl<char>;
@@ -924,7 +899,7 @@ private:
 public:
   __limited_formatter_iterator(WrappedOutputIterator &woit, size_t maxOp,
                                const locale &loc)
-      : oit_(&woit), avail_(maxOp), unicode_buf_(loc) {}
+      : oit_(addressof(woit)), avail_(maxOp), unicode_buf_(loc) {}
   inline WrappedOutputIterator out() const { return *oit_; }
   inline size_t avail() const { return avail_; }
 
@@ -1025,6 +1000,9 @@ private:
   int &precision_idx_ = precision_;
 
   void __parse_fill_and_align(auto &it) {
+    if (*it == '{' || *it == '}') {
+      return;
+    }
     auto opt = *(it + 1);
     switch (opt) {
     case '<':

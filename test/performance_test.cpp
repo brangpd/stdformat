@@ -22,6 +22,15 @@ protected:
   };
 };
 
+TEST_F(PerformanceTest, PerformanceTest_Format_Test) {
+  {
+    TimerGuard timerGuard("Format");
+    for (int i = 0; i < 500'000; ++i) {
+      (format("{} {:30b} {:30}", 42, 42, "HELLO WORLD"));
+    }
+  }
+}
+
 TEST_F(PerformanceTest, PerformanceTest_CharInsertionMethod_Test) {
   {
     string chars(5'000'000, 'c');
