@@ -581,29 +581,7 @@ class __basic_width_counter {
    * @param cd The UTF-32 encoded character.
    * @return 2 if the character is full width, or 1 if half width.
    */
-  static size_t width(char32_t cd) {
-    // ASCII codes would be used more often so provide a quick check.
-    if (cd < 0x1100) {
-      return 1;
-    }
-    // following code points pairs are ranges of full width character
-    static constexpr int codes[14][2] = {
-        {0x1100, 0x115f},   {0x2329, 0x232a},   {0x2e80, 0x303e},
-        {0x3040, 0xa4cf},   {0xac00, 0xd7a3},   {0xf900, 0xfaff},
-        {0xfe10, 0xfe19},   {0xfe30, 0xfe6f},   {0xff00, 0xff60},
-        {0xffe0, 0xffe6},   {0x1f300, 0x1f64f}, {0x1f900, 0x1f9ff},
-        {0x20000, 0x2fffd}, {0x30000, 0x3fffd},
-    };
-    for (auto &&pair : codes) {
-      if (pair[1] >= cd) {
-        if (pair[0] <= cd) {
-          return 2;
-        }
-        break;
-      }
-    }
-    return 1;
-  }
+  static size_t width(char32_t cd);
 };
 template <class CharT> class __width_counter;
 /**
@@ -611,109 +589,19 @@ template <class CharT> class __width_counter;
  */
 template <> class __width_counter<char> {
 public:
-  static size_t width(const basic_string_view<char> &sv, const locale &loc) {
-    enum { buflen = 16 };
-    char32_t c32[buflen];
-    size_t count = 0;
-    mbstate_t mbstate{};
-    // Note: The cuchar library function mbrtoc32 takes the global c locale for
-    // conversion which is not thread safe, thus have to use C++ codecvt.
-
-    // FIXME: deprecated, use char8_t instead of char.
-    using cvt = codecvt<char32_t, char, mbstate_t>;
-    auto &&f = use_facet<cvt>(loc);
-
-    const char *svp = sv.data();
-    const char *svpe = svp + sv.size(); // end of svp
-
-    const char *fromNext{};
-    char32_t *toNext{};
-
-    while (svp < svpe) {
-      auto inRes =
-          f.in(mbstate, svp, svpe, fromNext, c32, c32 + buflen, toNext);
-      if (svp == fromNext) {
-        break;
-      }
-      svp = fromNext;
-      switch (inRes) {
-      case codecvt_base::ok:
-      case codecvt_base::partial:
-        for (auto it = c32; it != toNext; ++it) {
-          count += __basic_width_counter::width(*it);
-        }
-        break;
-      case codecvt_base::error:
-      case codecvt_base::noconv:
-        goto L_break_while;
-      }
-      if (inRes == codecvt_base::ok) {
-        break;
-      }
-    }
-  L_break_while:
-    return count;
-  }
+  static size_t width(const basic_string_view<char> &sv, const locale &loc);
   static inline size_t width(char, const locale &) { return 1; }
 };
-extern template class __width_counter<char>;
 /**
  * Width counter for wchar_t.
  */
 template <> class __width_counter<wchar_t> {
 public:
-  static size_t width(const basic_string_view<wchar_t> &sv, const locale &loc) {
-    // Since standard library does not provide code converter from wchar_t to
-    // char32_t, first convert a wchar_t character to char then convert the char
-    // character to char32_t
-
-    // FIXME: deprecated, use char8_t instead of char
-    using cvt = codecvt<wchar_t, char, mbstate_t>;
-    auto &&f = use_facet<cvt>(loc); // wchat_t to char
-    mbstate_t mbstate{};
-
-    char32_t c32{};
-    size_t count = 0;
-    enum { cdataSize = 16 };
-    char cdata[cdataSize];
-
-    const wchar_t *svp = sv.data();
-    const wchar_t *svpe = svp + sv.size();
-    const wchar_t *fromNext{};
-    char *toNext{};
-
-    while (svp < svpe) {
-      // part 1: from wchar_t to char
-      auto outRes =
-          f.out(mbstate, svp, svpe, fromNext, cdata, cdata + cdataSize, toNext);
-      if (svp == fromNext) {
-        break;
-      }
-      svp = fromNext;
-      switch (outRes) {
-      case codecvt_base::ok:
-      case codecvt_base::partial:
-        break;
-      case codecvt_base::error:
-      case codecvt_base::noconv:
-        goto L_break_while;
-      }
-
-      // part 2: from char to char32_t, redirect to width counter of char
-      count += __width_counter<char>::width(
-          basic_string_view<char>(cdata, toNext - cdata), loc);
-      if (outRes == codecvt_base::ok) {
-        break;
-      }
-    }
-  L_break_while:
-    return count;
-  }
+  static size_t width(const basic_string_view<wchar_t> &sv, const locale &loc);
   static inline size_t width(wchar_t wc, const locale &loc) {
     return width(basic_string_view<wchar_t>(&wc, 1), loc);
   }
 };
-extern template class __width_counter<wchar_t>;
 
 /**
  * The buf to store unicode characters for width calculation.
@@ -810,9 +698,7 @@ public:
       : impl_(std::make_shared<__impl>(loc)) {}
 
   size_t count() const { return impl_->count_; }
-  inline void out(output_iterator<CharT> auto &oit) {
-    impl_->unicode_buf_.out(oit);
-  }
+  void out(output_iterator<CharT> auto &oit) { impl_->unicode_buf_.out(oit); }
 
   __width_counter_formatter_iterator &operator=(CharT c) {
     if (impl_->unicode_buf_ += c) {
@@ -835,33 +721,6 @@ struct __width_counter_formatter_iterator<CharT>::__impl {
 
   __impl(const locale &loc) : count_(), unicode_buf_(loc) {}
 };
-
-/**
- * Counter wrapper for formatted_size's. It does not write any character but
- * only counts the length of output characters.
- */
-template <class CharT> class __counter_formatter_iterator {
-  friend __format_details::__public_func;
-
-private:
-  size_t count_{};
-  CharT c_;
-
-public:
-  constexpr __counter_formatter_iterator() = default;
-  size_t count() const { return count_; }
-  inline decltype(auto) operator=(CharT c) {
-    ++count_;
-    c_ = c;
-    return *this;
-  }
-  inline void out(output_iterator<CharT> auto &oit) { *oit++ = c_; }
-  constexpr inline decltype(auto) operator*() { return *this; }
-  constexpr inline decltype(auto) operator++() { return *this; }
-  constexpr inline decltype(auto) operator++(int) { return *this; }
-};
-extern template class __counter_formatter_iterator<char>;
-extern template class __counter_formatter_iterator<wchar_t>;
 
 /**
  * Limited wrapper for format_n's. It limits the maximum width of output.
@@ -926,15 +785,7 @@ class __formatter_num_put : public num_put<CharT, OutputIt> {};
  * The helper ios base, which is only used to maintain the ios flags and
  * configurations of width, precision and location. Used for num_put::put().
  */
-struct __formatter_ios_base : ios_base {
-  __formatter_ios_base() = default;
-  __formatter_ios_base(const __formatter_ios_base &other) {
-    flags(other.flags());
-    width(other.width());
-    precision(other.precision());
-    imbue(other.getloc());
-  }
-};
+struct __formatter_ios_base : ios_base {};
 
 template <class CharT> struct __formatter_base {
   // The format spec consists of zero or more of the following fields in order:
@@ -1897,7 +1748,7 @@ private:
       try {
         return locale("");
       } catch (...) {
-        return locale("");
+        return locale();
       }
     }();
     return loc;
