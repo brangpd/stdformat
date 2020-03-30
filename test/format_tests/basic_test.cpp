@@ -64,3 +64,9 @@ TEST_F(BasicFormatTest, BasicFormatTest_Specialized_Test) {
   sprintf(buf, "%g %a %e %f", pi, pi, pi, pi);
   EXPECT_EQ(format("{:g} {:a} {:e} {:f}", pi, pi, pi, pi), buf);
 }
+
+TEST_F(BasicFormatTest, BasicFormatTest_FormatTo_Test) {
+  vector<char> vec(100);
+  format_to(vec.data(), "{} {}", "Hello", 42)[0] = 0;
+  EXPECT_STREQ(vec.data(), "Hello 42");
+}

@@ -1950,6 +1950,7 @@ private:
         }
         // update the iterator in pc first.
         pc.advance_to(it);
+        fc.advance_to(out);
         if (auto arg = fc.arg(argIdx)) {
           visit_format_arg(__visitor(pc, fc), std::move(arg));
         } else {
@@ -1957,6 +1958,7 @@ private:
         }
         // after the parse, pc.begin() must point at '}'
         it = pc.begin();
+        out = fc.out();
         __throw_invalid_format_if(it == ite || *it != '}');
         ++it;
       } else /*if (c == '}')*/ {
@@ -1969,7 +1971,7 @@ private:
       }
     }
 
-    return fc.out();
+    return out;
   }
 
   inline static string vformat(const locale &loc, const string_view &fmt,
