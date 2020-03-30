@@ -1,5 +1,4 @@
 #include "testutil.h"
-using namespace std;
 
 struct BasicFormatTest : FormatTest {};
 

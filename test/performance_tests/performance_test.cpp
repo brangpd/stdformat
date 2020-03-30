@@ -1,5 +1,6 @@
 #include "testutil.h"
 #include <chrono>
+#include <forward_list>
 #include <iostream>
 
 struct PerformanceTest : FormatTest {
