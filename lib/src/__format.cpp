@@ -38,18 +38,15 @@ template class __width_counter<char>;
 template class __width_counter<wchar_t>;
 template class __unicode_buf<char>;
 template class __unicode_buf<wchar_t>;
-template class __formatter_iterator_impl<char>;
-template class __formatter_iterator_impl<wchar_t>;
 template class __formatter_iterator<char>;
 template class __formatter_iterator<wchar_t>;
 template class __width_counter_formatter_iterator<char>;
 template class __width_counter_formatter_iterator<wchar_t>;
 template class __counter_formatter_iterator<char>;
 template class __counter_formatter_iterator<wchar_t>;
-template class __limited_formatter_iterator<__formatter_iterator<char>,
-                                                   char>;
-template class __limited_formatter_iterator<
-    __formatter_iterator<wchar_t>, wchar_t>;
+template class __limited_formatter_iterator<__formatter_iterator<char>, char>;
+template class __limited_formatter_iterator<__formatter_iterator<wchar_t>,
+                                            wchar_t>;
 template class __formatter_base<char>;
 template class __formatter_base<wchar_t>;
 } // namespace __format_details
