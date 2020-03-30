@@ -646,12 +646,9 @@ extern template class __unicode_buf<wchar_t>;
 
 /**
  * The formatter iterator is an output iterator that provides a wrapper of the
- * underlying iterator (say the back insert iterator). It behaves as if the
- * underlying iterator is being used directly, except that it allows objects of
- * derived classes to determine whether the output operation should be finally
- * executed.
- * @tparam Container The container, namely the basic string to produce
- * formatting output.
+ * underlying container (say the basic string). It behaves like a back inserter
+ * except it allows copy an entire range of string(view) so as to make use of
+ * any temporary string(view) produced as intermediate result.
  */
 template <class CharT> class __formatter_iterator {
   friend __format_details::__public_func;
@@ -661,7 +658,6 @@ private:
 
 public:
   explicit __formatter_iterator(basic_string<CharT> &str) : str_(&str) {}
-  inline basic_string<CharT> result() { return std::move(*str_); }
   inline decltype(auto) operator=(CharT c) {
     str_->operator+=(c);
     return *this;
@@ -736,7 +732,6 @@ public:
   __limited_formatter_iterator(WrappedOutputIterator &woit, size_t maxOp,
                                const locale &loc)
       : impl_(std::make_shared<__impl>(woit, maxOp, loc)) {}
-  inline WrappedOutputIterator out() const { return *impl_->oit_; }
   inline size_t avail() const { return impl_->avail_; }
 
   __limited_formatter_iterator &operator=(CharT c) {
@@ -1194,7 +1189,7 @@ private:
     }
     fit = __formatter_num_put<CharT, __formatter_iterator<CharT>>().put(
         fit, iosb, fillOrZero, static_cast<uintmax_t>(ut));
-    return __fill_and_output(fit.result(), fc);
+    return __fill_and_output(std::move(str), fc);
   }
 
   // floating point specific
@@ -1291,7 +1286,7 @@ private:
     }
     fit = __formatter_num_put<CharT, __formatter_iterator<CharT>>().put(
         fit, iosb, fillOrZero, t);
-    return __fill_and_output(fit.result(), fc);
+    return __fill_and_output(std::move(str), fc);
   }
 
   // integral specific
@@ -1320,9 +1315,8 @@ private:
       __formatter_iterator<CharT> fit(str);
       __limited_formatter_iterator<__formatter_iterator<CharT>, CharT> lfit(
           fit, precision_, fc.locale());
-      lfit = copy(t.begin(), t.end(), lfit);
-      fit = lfit.out();
-      return __fill_and_output(fit.result(), fc);
+      copy(t.begin(), t.end(), lfit);
+      return __fill_and_output(std::move(str), fc);
     } else {
       return __fill_and_output(t, fc);
     };
@@ -1743,17 +1737,6 @@ private:
     }
   };
 
-  inline static const locale &__default_locale() {
-    static locale loc = [] {
-      try {
-        return locale("");
-      } catch (...) {
-        return locale();
-      }
-    }();
-    return loc;
-  }
-
   template <class OutputIt, class CharT>
   static OutputIt vformat_to(OutputIt &out, const locale &loc,
                              const basic_string_view<CharT> &fmt,
@@ -1829,16 +1812,16 @@ private:
                                const format_args &args) {
     basic_string<char> str;
     __formatter_iterator<char> it(str);
-    it = vformat_to(it, loc, fmt, args);
-    return it.result();
+    vformat_to(it, loc, fmt, args);
+    return std::move(str);
   }
 
   inline static wstring vformat(const locale &loc, const wstring_view &fmt,
                                 const wformat_args &args) {
     basic_string<wchar_t> str;
     __formatter_iterator<wchar_t> it(str);
-    it = vformat_to(it, loc, fmt, args);
-    return it.result();
+    vformat_to(it, loc, fmt, args);
+    return std::move(str);
   }
 
   template <class OutputIt, class CharT, class... Args>
@@ -1852,7 +1835,7 @@ private:
     it = vformat_to(it, loc, fmt,
                     basic_format_args(make_format_args<context_t>(args...)));
     decltype(n) written = n - it.avail();
-    return {.out = it.out(), .size = written};
+    return {.out = out, .size = written};
   }
 
   template <class CharT, class... Args>
@@ -1889,12 +1872,10 @@ inline wstring format(const locale &loc, wstring_view fmt,
 }
 
 inline string vformat(string_view fmt, format_args args) {
-  return vformat(__format_details::__public_func::__default_locale(), fmt,
-                 std::move(args));
+  return vformat(locale::classic(), fmt, std::move(args));
 }
 inline wstring vformat(wstring_view fmt, wformat_args args) {
-  return vformat(__format_details::__public_func::__default_locale(), fmt,
-                 std::move(args));
+  return vformat(locale::classic(), fmt, std::move(args));
 }
 inline string vformat(const locale &loc, string_view fmt, format_args args) {
   return __format_details::__public_func::vformat(loc, fmt, std::move(args));
@@ -1931,15 +1912,13 @@ template <class OutputIt>
 inline OutputIt
 vformat_to(OutputIt out, string_view fmt,
            format_args_t<type_identity_t<OutputIt>, char> args) {
-  return vformat_to(out, __format_details::__public_func::__default_locale(),
-                    fmt, std::move(args));
+  return vformat_to(out, locale::classic(), fmt, std::move(args));
 }
 template <class OutputIt>
 inline OutputIt
 vformat_to(OutputIt out, wstring_view fmt,
            format_args_t<type_identity_t<OutputIt>, wchar_t> args) {
-  return vformat_to(out, __format_details::__public_func::__default_locale(),
-                    fmt, std::move(args));
+  return vformat_to(out, locale::classic(), fmt, std::move(args));
 }
 template <class OutputIt>
 inline OutputIt
@@ -1960,17 +1939,13 @@ template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, string_view fmt,
             const Args &... args) {
-  return format_to_n(out, n,
-                     __format_details::__public_func::__default_locale(), fmt,
-                     args...);
+  return format_to_n(out, n, locale::classic(), fmt, args...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, wstring_view fmt,
             const Args &... args) {
-  return format_to_n(out, n,
-                     __format_details::__public_func::__default_locale(), fmt,
-                     args...);
+  return format_to_n(out, n, locale::classic(), fmt, args...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
@@ -1991,13 +1966,11 @@ format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
 
 template <class... Args>
 inline size_t formatted_size(string_view fmt, const Args &... args) {
-  return formatted_size(__format_details::__public_func::__default_locale(),
-                        fmt, args...);
+  return formatted_size(locale::classic(), fmt, args...);
 }
 template <class... Args>
 inline size_t formatted_size(wstring_view fmt, const Args &... args) {
-  return formatted_size(__format_details::__public_func::__default_locale(),
-                        fmt, args...);
+  return formatted_size(locale::classic(), fmt, args...);
 }
 template <class... Args>
 inline size_t formatted_size(const locale &loc, string_view fmt,

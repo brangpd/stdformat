@@ -79,7 +79,6 @@ size_t __width_counter<wchar_t>::width(const basic_string_view<wchar_t> &sv,
   auto &&f = use_facet<cvt>(loc); // wchat_t to char
   mbstate_t mbstate{};
 
-  char32_t c32{};
   size_t count = 0;
   enum { cdataSize = 16 };
   char cdata[cdataSize];
