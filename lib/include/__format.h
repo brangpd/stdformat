@@ -134,6 +134,7 @@ class format_error;
 #define __THROW_FORMAT_ERROR(why) std::exit(1)
 #define __IMPLEMENTATION_BUG() std::exit(2)
 #endif
+
 namespace std {
 
 namespace __format_details {
@@ -393,6 +394,8 @@ template <class FormatContext> class basic_format_arg {
   friend decltype(auto) visit_format_arg(Visitor &&vis,
                                          basic_format_arg<Context2> arg);
 
+  friend __format_details::__public_func;
+
 private:
   using char_type = typename FormatContext::char_type;
 
@@ -480,6 +483,40 @@ public:
     return !holds_alternative<monostate>(value_);
   }
 };
+
+namespace __format_details {
+/**
+ * Visitor for basic types or user-defined classes.
+ * @tparam OutputIt The output iterator.
+ * @tparam CharT The char type of output.
+ */
+template <class OutputIt, class CharT> struct __visitor {
+  basic_format_parse_context<CharT> &pc;
+  basic_format_context<OutputIt, CharT> &fc;
+
+  __visitor(basic_format_parse_context<CharT> &pc,
+            basic_format_context<OutputIt, CharT> &fc)
+      : pc(pc), fc(fc) {}
+
+  // Unreachable
+  void operator()(const monostate &) {}
+
+  // Built-in basic types.
+  template <class T>  void operator()(const T &v) {
+    using formatter_type = typename basic_format_context<
+        OutputIt, CharT>::template formatter_type<remove_cvref_t<T>>;
+    formatter_type f;
+    pc.advance_to(f.parse(pc));
+    fc.advance_to(f.format(v, fc));
+  }
+
+  // Redirect for user defined formatter. See basic_format_arg::handle.
+  void operator()(const typename basic_format_arg<
+                  basic_format_context<OutputIt, CharT>>::handle &handle) {
+    const_cast<decay_t<decltype(handle)> &>(handle).format(pc, fc);
+  }
+};
+} // namespace __format_details
 
 /**
  * Visitation interface for user-defined arguments.
@@ -606,13 +643,14 @@ public:
 /**
  * The buf to store unicode characters for width calculation.
  */
-template <class CharT> class __unicode_buf {
+template <class CharT> class __unicode_buf;
+template <> class __unicode_buf<char> {
 private:
   enum { buflen = 4, width_dirty = -1 };
-  CharT buf_[buflen];
+  char buf_[buflen];
   uint8_t cur_{};
   locale loc_;
-  mutable size_t width_{}; // width cache
+  mutable int8_t width_{width_dirty}; // width cache
 
 public:
   explicit __unicode_buf(const locale &loc) : loc_(loc) {}
@@ -628,19 +666,45 @@ public:
   }
   inline size_t width() const {
     return width_ == width_dirty
-               ? width_ = __width_counter<CharT>::width({buf_, cur_}, loc_)
+               ? width_ = __width_counter<char>::width({buf_, cur_}, loc_)
                : width_;
   }
   inline size_t size() const { return cur_; }
-  inline decltype(auto) operator+=(CharT c) {
-    if (cur_ == buflen) {
-      __IMPLEMENTATION_BUG();
-    }
+  inline decltype(auto) operator+=(char c) {
     width_ = width_dirty;
     buf_[cur_++] = c;
     return *this;
   }
 };
+template <> class __unicode_buf<wchar_t> {
+private:
+  enum { width_dirty = -1 };
+  wchar_t c_;
+  locale loc_;
+  mutable int8_t width_{width_dirty}; // width cache
+
+public:
+  explicit __unicode_buf(const locale &loc) : loc_(loc) {}
+  inline operator bool() const { return width_ != width_dirty; }
+  inline void out(auto &it) {
+    if (*this) {
+      *it++ = c_;
+    }
+  }
+  inline void reset() { width_ = width_dirty; }
+  inline size_t width() const {
+    return width_ == width_dirty
+               ? width_ = __width_counter<wchar_t>::width({&c_, 1}, loc_)
+               : width_;
+  }
+  inline size_t size() const { return 1; }
+  inline decltype(auto) operator+=(wchar_t c) {
+    c_ = c;
+    width_ = width_dirty;
+    return *this;
+  }
+};
+
 extern template class __unicode_buf<char>;
 extern template class __unicode_buf<wchar_t>;
 
@@ -782,9 +846,12 @@ class __formatter_num_put : public num_put<CharT, OutputIt> {};
  */
 struct __formatter_ios_base : ios_base {};
 
-template <class CharT> struct __formatter_base {
+template <class CharT> struct __formatter_base_impl {
+  template <class> friend struct __formatter_base;
+  template <class> friend struct __chrono_formatter_base;
   // The format spec consists of zero or more of the following fields in order:
   // fill_and_align_ sign_ sharp_ zero_ width_ precision_ locale_specific_ type_
+
 private:
   enum class align : uint8_t {
     none,
@@ -1041,14 +1108,7 @@ private:
       *out++ = fill_char_;
     }
     // core number part
-    if constexpr (requires { { *out++ = std::forward<decltype(sv)>(sv)}; }) {
-      // For a string, if the output iterator is __formatter_iterator,
-      // we make use of that temporary string.
-      *out++ = std::forward<decltype(sv)>(sv);
-    } else {
-      // otherwise, just output one by one.
-      out = copy(sv.begin(), sv.end(), out);
-    }
+    out = copy(sv.begin(), sv.end(), out);
     // right fill
     for (size_t i = 0; i < fillR; ++i) {
       *out++ = fill_char_;
@@ -1386,7 +1446,25 @@ private:
     return __format(basic_string_view<CharT>(cstr), fc);
   }
 
-  template <class T> void __format_check_type_align(const T &) {
+  template <class T>
+  void __format_check_align() {
+    if (align_ == align::none) {
+      if constexpr (__is_string_v<T>) {
+        align_ = align::left;
+      } else {
+        if (!zero_) {
+          // for numeric's, default align to right if no padding zeros only
+          align_ = align::right;
+        }
+      }
+    }
+    if (align_ != align::none) {
+      // now if align is specified, zero should be ignored
+      zero_ = false;
+    }
+  }
+
+  template <class T> void __format_check_type() {
     if constexpr (__is_string_v<T>) {
       if (type_ == type::none) {
         type_ = type::s;
@@ -1464,21 +1542,6 @@ private:
         __throw_invalid_format_type();
       }
     }
-
-    if (align_ == align::none) {
-      if constexpr (__is_string_v<T>) {
-        align_ = align::left;
-      } else {
-        if (!zero_) {
-          // for numeric's, default align to right if no padding zeros only
-          align_ = align::right;
-        }
-      }
-    }
-    if (align_ != align::none) {
-      // now if align is specified, zero should be ignored
-      zero_ = false;
-    }
   }
 
   void __format_check_width_precision(auto &fc) {
@@ -1516,28 +1579,34 @@ private:
       precision_nested_ = false;
     }
   }
+};
+
+template <class CharT> struct __formatter_base {
+private:
+  __formatter_base_impl<CharT> impl_;
 
 public:
   typename basic_format_parse_context<CharT>::iterator
   parse(basic_format_parse_context<CharT> &pc) {
     auto it = pc.begin();
 
-    __parse_fill_and_align(it);
-    __parse_sign_sharp_zero(it);
-    __parse_width_precision(pc, it);
-    __parse_locale_specific(it);
-    __parse_type(it);
+    impl_.__parse_fill_and_align(it);
+    impl_.__parse_sign_sharp_zero(it);
+    impl_.__parse_width_precision(pc, it);
+    impl_.__parse_locale_specific(it);
+    impl_.__parse_type(it);
 
     return it;
   }
 
-  template <class OutputIt>
+  template <class T, class OutputIt>
   typename basic_format_context<OutputIt, CharT>::iterator
-  format(const auto &t, basic_format_context<OutputIt, CharT> &fc) {
+  format(const T &t, basic_format_context<OutputIt, CharT> &fc) {
     // do some common check before formatting
-    __format_check_type_align(t);
-    __format_check_width_precision(fc);
-    return __format(t, fc);
+    impl_.template __format_check_type<T>();
+    impl_.template __format_check_align<T>();
+    impl_.__format_check_width_precision(fc);
+    return impl_.__format(t, fc);
   }
 };
 extern template class __formatter_base<char>;
@@ -1705,38 +1774,6 @@ private:
     __THROW_FORMAT_ERROR("invalid argument");
   }
 
-  /**
-   * Visitor for basic types or user-defined classes.
-   * @tparam OutputIt The output iterator.
-   * @tparam CharT The char type of output.
-   */
-  template <class OutputIt, class CharT> struct __visitor {
-    basic_format_parse_context<CharT> &pc;
-    basic_format_context<OutputIt, CharT> &fc;
-
-    __visitor(basic_format_parse_context<CharT> &pc,
-              basic_format_context<OutputIt, CharT> &fc)
-        : pc(pc), fc(fc) {}
-
-    // Unreachable
-    void operator()(const monostate &) { __IMPLEMENTATION_BUG(); }
-
-    // Built-in basic types.
-    template <class T> void operator()(const T &v) {
-      using formatter_type = typename basic_format_context<
-          OutputIt, CharT>::template formatter_type<remove_cvref_t<T>>;
-      formatter_type f;
-      pc.advance_to(f.parse(pc));
-      fc.advance_to(f.format(v, fc));
-    }
-
-    // Redirect for user defined formatter. See basic_format_arg::handle.
-    void operator()(const typename basic_format_arg<
-                    basic_format_context<OutputIt, CharT>>::handle &handle) {
-      const_cast<decay_t<decltype(handle)> &>(handle).format(pc, fc);
-    }
-  };
-
   template <class OutputIt, class CharT>
   static OutputIt vformat_to(OutputIt &out, const locale &loc,
                              const basic_string_view<CharT> &fmt,
@@ -1786,7 +1823,7 @@ private:
         pc.advance_to(it);
         fc.advance_to(out);
         if (auto arg = fc.arg(argIdx)) {
-          visit_format_arg(__visitor(pc, fc), std::move(arg));
+          visit_format_arg(__format_details::__visitor(pc, fc), std::move(arg));
         } else {
           __throw_invalid_argument();
         }

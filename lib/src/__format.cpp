@@ -15,9 +15,9 @@ size_t __basic_width_counter::width(char32_t cd) {
       {0xffe0, 0xffe6},   {0x1f300, 0x1f64f}, {0x1f900, 0x1f9ff},
       {0x20000, 0x2fffd}, {0x30000, 0x3fffd},
   };
-  for (auto &&pair : codes) {
-    if (pair[1] >= cd) {
-      if (pair[0] <= cd) {
+  for (auto &&[l, r] : codes) {
+    if (r >= cd) {
+      if (l <= cd) {
         return 2;
       }
       break;

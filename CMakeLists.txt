@@ -10,5 +10,5 @@ add_subdirectory(test)
 
 add_library(ATestClass ATestClass.cpp)
 target_link_libraries(ATestClass stdformat)
-add_executable(example main.cpp)
+add_executable(example example.cpp)
 target_link_libraries(example stdformat ATestClass)
