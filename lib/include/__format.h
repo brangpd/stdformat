@@ -160,12 +160,12 @@ using format_args_t = basic_format_args<basic_format_context<Out, CharT>>;
 class format_error;
 
 // [format.functions], formatting functions
-template <class... Args> string format(string_view fmt, const Args &... args);
-template <class... Args> wstring format(wstring_view fmt, const Args &... args);
+template <class... Args> string format(string_view fmt, const Args &...args);
+template <class... Args> wstring format(wstring_view fmt, const Args &...args);
 template <class... Args>
-string format(const locale &loc, string_view fmt, const Args &... args);
+string format(const locale &loc, string_view fmt, const Args &...args);
 template <class... Args>
-wstring format(const locale &loc, wstring_view fmt, const Args &... args);
+wstring format(const locale &loc, wstring_view fmt, const Args &...args);
 
 string vformat(string_view fmt, format_args args);
 wstring vformat(wstring_view fmt, wformat_args args);
@@ -173,15 +173,14 @@ string vformat(const locale &loc, string_view fmt, format_args args);
 wstring vformat(const locale &loc, wstring_view fmt, wformat_args args);
 
 template <class Out, class... Args>
-Out format_to(Out out, string_view fmt, const Args &... args);
+Out format_to(Out out, string_view fmt, const Args &...args);
 template <class Out, class... Args>
-Out format_to(Out out, wstring_view fmt, const Args &... args);
+Out format_to(Out out, wstring_view fmt, const Args &...args);
 template <class Out, class... Args>
-Out format_to(Out out, const locale &loc, string_view fmt,
-              const Args &... args);
+Out format_to(Out out, const locale &loc, string_view fmt, const Args &...args);
 template <class Out, class... Args>
 Out format_to(Out out, const locale &loc, wstring_view fmt,
-              const Args &... args);
+              const Args &...args);
 
 template <class Out>
 Out vformat_to(Out out, string_view fmt,
@@ -202,28 +201,27 @@ template <class Out> struct format_to_n_result {
 };
 template <class Out, class... Args>
 format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                    string_view fmt, const Args &... args);
+                                    string_view fmt, const Args &...args);
 template <class Out, class... Args>
 format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
-                                    wstring_view fmt, const Args &... args);
+                                    wstring_view fmt, const Args &...args);
 template <class Out, class... Args>
 format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
                                     const locale &loc, string_view fmt,
-                                    const Args &... args);
+                                    const Args &...args);
 template <class Out, class... Args>
 format_to_n_result<Out> format_to_n(Out out, iter_difference_t<Out> n,
                                     const locale &loc, wstring_view fmt,
-                                    const Args &... args);
+                                    const Args &...args);
 
 template <class... Args>
-size_t formatted_size(string_view fmt, const Args &... args);
+size_t formatted_size(string_view fmt, const Args &...args);
 template <class... Args>
-size_t formatted_size(wstring_view fmt, const Args &... args);
+size_t formatted_size(wstring_view fmt, const Args &...args);
 template <class... Args>
-size_t formatted_size(const locale &loc, string_view fmt, const Args &... args);
+size_t formatted_size(const locale &loc, string_view fmt, const Args &...args);
 template <class... Args>
-size_t formatted_size(const locale &loc, wstring_view fmt,
-                      const Args &... args);
+size_t formatted_size(const locale &loc, wstring_view fmt, const Args &...args);
 
 // [format.formatter], formatter
 template <class T, class CharT = char> struct formatter;
@@ -244,10 +242,10 @@ decltype(auto) visit_format_arg(Visitor &&vis, basic_format_arg<Context> arg);
 template <class Context, class... Args> struct __format_arg_store;
 
 template <class Context = format_context, class... Args>
-__format_arg_store<Context, Args...> make_format_args(const Args &... args);
+__format_arg_store<Context, Args...> make_format_args(const Args &...args);
 template <class... Args>
 __format_arg_store<wformat_context, Args...>
-make_wformat_args(const Args &... args);
+make_wformat_args(const Args &...args);
 } // namespace std
 
 // implementation
@@ -384,11 +382,11 @@ public:
 template <class FormatContext> class basic_format_arg {
   template <class Context2, class... Args>
   friend __format_arg_store<Context2, Args...>
-  make_format_args(const Args &... args);
+  make_format_args(const Args &...args);
 
   template <class... Args>
   friend __format_arg_store<wformat_context, Args...>
-  make_wformat_args(const Args &... args);
+  make_wformat_args(const Args &...args);
 
   template <class Visitor, class Context2>
   friend decltype(auto) visit_format_arg(Visitor &&vis,
@@ -502,7 +500,7 @@ template <class OutputIt, class CharT> struct __visitor {
   void operator()(const monostate &) {}
 
   // Built-in basic types.
-  template <class T>  void operator()(const T &v) {
+  template <class T> void operator()(const T &v) {
     using formatter_type = typename basic_format_context<
         OutputIt, CharT>::template formatter_type<remove_cvref_t<T>>;
     formatter_type f;
@@ -538,12 +536,12 @@ template <class FormatContext, class... Args> struct __format_arg_store {
 
 template <class FormatContext, class... Args>
 __format_arg_store<FormatContext, Args...>
-make_format_args(const Args &... args) {
+make_format_args(const Args &...args) {
   return {basic_format_arg<FormatContext>(args)...};
 }
 template <class... Args>
 __format_arg_store<wformat_context, Args...>
-make_wformat_args(const Args &... args) {
+make_wformat_args(const Args &...args) {
   return {basic_format_arg<wformat_context>(args)...};
 }
 
@@ -1446,8 +1444,7 @@ private:
     return __format(basic_string_view<CharT>(cstr), fc);
   }
 
-  template <class T>
-  void __format_check_align() {
+  template <class T> void __format_check_align() {
     if (align_ == align::none) {
       if constexpr (__is_string_v<T>) {
         align_ = align::left;
@@ -1548,7 +1545,7 @@ private:
     // check nested width & precision
     if (width_nested_) {
       width_ = visit_format_arg(
-          []<class T>(T && v)->int {
+          []<class T>(T &&v) -> int {
             if constexpr (is_integral_v<decay_t<T>>) {
               // width should be positive
               if (v > 0 && v <= numeric_limits<decltype(width_)>::max()) {
@@ -1564,7 +1561,7 @@ private:
     }
     if (precision_nested_) {
       precision_ = visit_format_arg(
-          []<class T>(T && v)->int {
+          []<class T>(T &&v) -> int {
             if constexpr (is_integral_v<decay_t<T>>) {
               // precision should be non-negative
               if (v >= 0 && v <= numeric_limits<decltype(precision_)>::max()) {
@@ -1735,30 +1732,30 @@ private:
   template <class Out, class... Args>
   friend format_to_n_result<Out>
   std::format_to_n(Out out, iter_difference_t<Out> n, string_view fmt,
-                   const Args &... args);
+                   const Args &...args);
   template <class Out, class... Args>
   friend format_to_n_result<Out>
   std::format_to_n(Out out, iter_difference_t<Out> n, wstring_view fmt,
-                   const Args &... args);
+                   const Args &...args);
   template <class Out, class... Args>
   friend format_to_n_result<Out>
   std::format_to_n(Out out, iter_difference_t<Out> n, const locale &loc,
-                   string_view fmt, const Args &... args);
+                   string_view fmt, const Args &...args);
   template <class Out, class... Args>
   friend format_to_n_result<Out>
   std::format_to_n(Out out, iter_difference_t<Out> n, const locale &loc,
-                   wstring_view fmt, const Args &... args);
+                   wstring_view fmt, const Args &...args);
 
   template <class... Args>
-  friend size_t std::formatted_size(string_view fmt, const Args &... args);
+  friend size_t std::formatted_size(string_view fmt, const Args &...args);
   template <class... Args>
-  friend size_t std::formatted_size(wstring_view fmt, const Args &... args);
+  friend size_t std::formatted_size(wstring_view fmt, const Args &...args);
   template <class... Args>
   friend size_t std::formatted_size(const locale &loc, string_view fmt,
-                                    const Args &... args);
+                                    const Args &...args);
   template <class... Args>
   friend size_t std::formatted_size(const locale &loc, wstring_view fmt,
-                                    const Args &... args);
+                                    const Args &...args);
 
   static inline void __throw_invalid_format_if(bool b) {
     if (b) {
@@ -1864,7 +1861,7 @@ private:
   template <class OutputIt, class CharT, class... Args>
   static inline format_to_n_result<OutputIt>
   format_to_n(OutputIt &out, iter_difference_t<OutputIt> n, const locale &loc,
-              const basic_string_view<CharT> &fmt, const Args &... args) {
+              const basic_string_view<CharT> &fmt, const Args &...args) {
     using iterator_t = __limited_formatter_iterator<OutputIt, CharT>;
     using context_t = basic_format_context<iterator_t, CharT>;
     n = n > 0 ? n : 0;
@@ -1878,7 +1875,7 @@ private:
   template <class CharT, class... Args>
   static size_t formatted_size(const locale &loc,
                                const basic_string_view<CharT> &fmt,
-                               const Args &... args) {
+                               const Args &...args) {
     using iterator_t = __width_counter_formatter_iterator<CharT>;
     using context_t = basic_format_context<iterator_t, CharT>;
     iterator_t it(loc);
@@ -1891,20 +1888,20 @@ private:
 
 // [format.functions], formatting functions
 template <class... Args>
-inline string format(string_view fmt, const Args &... args) {
+inline string format(string_view fmt, const Args &...args) {
   return vformat(fmt, make_format_args(args...));
 }
 template <class... Args>
-inline wstring format(wstring_view fmt, const Args &... args) {
+inline wstring format(wstring_view fmt, const Args &...args) {
   return vformat(fmt, make_wformat_args(args...));
 }
 template <class... Args>
-inline string format(const locale &loc, string_view fmt, const Args &... args) {
+inline string format(const locale &loc, string_view fmt, const Args &...args) {
   return vformat(loc, fmt, make_format_args(args...));
 }
 template <class... Args>
 inline wstring format(const locale &loc, wstring_view fmt,
-                      const Args &... args) {
+                      const Args &...args) {
   return vformat(loc, fmt, make_wformat_args(args...));
 }
 
@@ -1922,25 +1919,24 @@ inline wstring vformat(const locale &loc, wstring_view fmt, wformat_args args) {
 }
 
 template <class OutputIt, class... Args>
-inline OutputIt format_to(OutputIt out, string_view fmt, const Args &... args) {
+inline OutputIt format_to(OutputIt out, string_view fmt, const Args &...args) {
   using context_t = basic_format_context<type_identity_t<OutputIt>, char>;
   return vformat_to(out, fmt, make_format_args<context_t>(args...));
 }
 template <class OutputIt, class... Args>
-inline OutputIt format_to(OutputIt out, wstring_view fmt,
-                          const Args &... args) {
+inline OutputIt format_to(OutputIt out, wstring_view fmt, const Args &...args) {
   using context_t = basic_format_context<type_identity_t<OutputIt>, wchar_t>;
   return vformat_to(out, fmt, make_format_args<context_t>(args...));
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, const locale &loc, string_view fmt,
-                          const Args &... args) {
+                          const Args &...args) {
   using context_t = basic_format_context<type_identity_t<OutputIt>, char>;
   return vformat_to(out, loc, fmt, make_format_args<context_t>(args...));
 }
 template <class OutputIt, class... Args>
 inline OutputIt format_to(OutputIt out, const locale &loc, wstring_view fmt,
-                          const Args &... args) {
+                          const Args &...args) {
   using context_t = basic_format_context<type_identity_t<OutputIt>, wchar_t>;
   return vformat_to(out, loc, fmt, make_format_args<context_t>(args...));
 }
@@ -1975,19 +1971,19 @@ vformat_to(OutputIt out, const locale &loc, wstring_view fmt,
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, string_view fmt,
-            const Args &... args) {
+            const Args &...args) {
   return format_to_n(out, n, locale::classic(), fmt, args...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, wstring_view fmt,
-            const Args &... args) {
+            const Args &...args) {
   return format_to_n(out, n, locale::classic(), fmt, args...);
 }
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
-            string_view fmt, const Args &... args) {
+            string_view fmt, const Args &...args) {
   using context_t = basic_format_context<type_identity_t<OutputIt>, char>;
   return __format_details::__public_func::format_to_n(out, n, loc, fmt,
                                                       args...);
@@ -1995,28 +1991,28 @@ format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
 template <class OutputIt, class... Args>
 inline format_to_n_result<OutputIt>
 format_to_n(OutputIt out, iter_difference_t<OutputIt> n, const locale &loc,
-            wstring_view fmt, const Args &... args) {
+            wstring_view fmt, const Args &...args) {
   using context_t = basic_format_context<type_identity_t<OutputIt>, wchar_t>;
   return __format_details::__public_func::format_to_n(out, n, loc, fmt,
                                                       args...);
 }
 
 template <class... Args>
-inline size_t formatted_size(string_view fmt, const Args &... args) {
+inline size_t formatted_size(string_view fmt, const Args &...args) {
   return formatted_size(locale::classic(), fmt, args...);
 }
 template <class... Args>
-inline size_t formatted_size(wstring_view fmt, const Args &... args) {
+inline size_t formatted_size(wstring_view fmt, const Args &...args) {
   return formatted_size(locale::classic(), fmt, args...);
 }
 template <class... Args>
 inline size_t formatted_size(const locale &loc, string_view fmt,
-                             const Args &... args) {
+                             const Args &...args) {
   return __format_details::__public_func::formatted_size(loc, fmt, args...);
 }
 template <class... Args>
 inline size_t formatted_size(const locale &loc, wstring_view fmt,
-                             const Args &... args) {
+                             const Args &...args) {
   return __format_details::__public_func::formatted_size(loc, fmt, args...);
 }
 } // namespace std
